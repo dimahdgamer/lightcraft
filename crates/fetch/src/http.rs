@@ -1,13 +1,15 @@
-//! A small HTTP/1.1 GET client for model downloads, in pure Rust: `std::net` sockets and, for
-//! `https://`, rustls with the RustCrypto provider (`rustls-rustcrypto`; no `ring` or
+//! A small HTTP/1.1 client for model downloads and WebDAV, in pure Rust: `std::net` sockets and,
+//! for `https://`, rustls with the RustCrypto provider (`rustls-rustcrypto`; no `ring` or
 //! `aws-lc-rs`, so nothing is compiled from C or assembly) and the Mozilla root certificates
 //! (`webpki-roots`).
 //!
-//! Only what a large-file download needs: one request per connection (`Connection: close`),
+//! Only what a large-file transfer needs: one request per connection (`Connection: close`),
 //! `Range` requests for resuming, redirects (followed by the caller), `Content-Length`,
-//! chunked and read-to-close bodies. Every read waits at most `stall` for data and checks the
-//! cancel flag at least twice a second, so a dead server or a cancelled download never hangs
-//! the downloading thread. No proxies (see docs/ai-masks.md).
+//! chunked and read-to-close bodies. [`get`] is the download call; [`request`] takes any method
+//! (`PUT`, `PROPFIND`, `MKCOL`…) and a body held in memory or streamed from a reader, so an
+//! upload never has to fit in memory. Every read and write waits at most `stall` for progress and
+//! checks the cancel flag at least twice a second, so a dead server or a cancelled transfer never
+//! hangs the calling thread. No proxies (see docs/ai-masks.md).
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -20,6 +22,8 @@ use std::time::{Duration, Instant};
 pub enum HttpError {
     /// The URL can't be used (scheme, host, characters).
     BadUrl(String),
+    /// The request can't be sent as asked (method, header, body length).
+    BadRequest(String),
     /// Name resolution or connecting failed (or took longer than the connect timeout).
     Connect(String),
     /// No data arrived for the stall timeout.
@@ -38,6 +42,7 @@ impl std::fmt::Display for HttpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             HttpError::BadUrl(e) => write!(f, "unusable URL: {e}"),
+            HttpError::BadRequest(e) => write!(f, "unusable request: {e}"),
             HttpError::Connect(e) => write!(f, "could not connect: {e}"),
             HttpError::Stalled => write!(f, "the server stopped sending data"),
             HttpError::Cancelled => write!(f, "cancelled"),
@@ -394,6 +399,27 @@ impl Response {
         }
     }
 
+    /// The whole body in memory, for small answers (a `PROPFIND` listing): an error when it is,
+    /// or announces itself as, longer than `max` bytes.
+    pub fn read_all(&mut self, max: usize, limits: &Limits) -> Result<Vec<u8>, HttpError> {
+        let too_big = || HttpError::Protocol(format!("the response body is larger than {max} bytes"));
+        if self.content_length().is_some_and(|n| n > max as u64) {
+            return Err(too_big());
+        }
+        let mut out = Vec::new();
+        let mut buf = vec![0u8; 16 * 1024];
+        loop {
+            let n = self.read(&mut buf, limits)?;
+            if n == 0 {
+                return Ok(out);
+            }
+            if out.len().saturating_add(n) > max {
+                return Err(too_big());
+            }
+            out.extend_from_slice(buf.get(..n).unwrap_or_default());
+        }
+    }
+
     /// Read body bytes into `out` (0 at the end of the body).
     pub fn read(&mut self, out: &mut [u8], limits: &Limits) -> Result<usize, HttpError> {
         match &mut self.body {
@@ -455,23 +481,118 @@ impl Response {
     }
 }
 
+/// What a request sends after its headers.
+pub enum Body<'a> {
+    /// Nothing.
+    None,
+    /// Bytes held in memory (a `PROPFIND` XML document).
+    Bytes(&'a [u8]),
+    /// Exactly `len` bytes streamed from `reader` (a file upload, never read into memory as a
+    /// whole). The server is told `Content-Length: len` first, so a reader that ends before `len`
+    /// bytes fails the request (the server has been promised more than it gets). Boxed rather
+    /// than `&mut dyn Read` so a body can be built before the URL it goes to (a `&'a mut` reader
+    /// would make `Body<'a>` invariant); to keep a reader, pass `Box::new(&mut reader)`.
+    Reader { len: u64, reader: Box<dyn Read + 'a> },
+}
+
+/// One request: a method (`GET`, `PUT`, `PROPFIND`…), a URL, extra headers and a body.
+pub struct Request<'a> {
+    pub method: &'a str,
+    pub url: &'a Url,
+    pub headers: &'a [(&'a str, String)],
+    pub body: Body<'a>,
+}
+
+/// A streamed body is sent in pieces of one TLS record, so rustls' send buffer never fills up.
+const UPLOAD_PIECE: usize = 16 * 1024;
+
+/// Headers the client sets itself. A caller can't add a second one: two `Content-Length`s or a
+/// `Transfer-Encoding` beside one are how requests get smuggled past a proxy.
+const MANAGED_HEADERS: [&str; 4] = ["host", "content-length", "transfer-encoding", "connection"];
+
+fn check_method(method: &str) -> Result<(), HttpError> {
+    if (1..=16).contains(&method.len()) && method.bytes().all(|b| b.is_ascii_uppercase()) {
+        return Ok(());
+    }
+    Err(HttpError::BadRequest(format!("unusable method `{}`", method.chars().take(20).collect::<String>())))
+}
+
+fn check_header(name: &str, value: &str) -> Result<(), HttpError> {
+    let name_ok = !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    let value_ok = !value.chars().any(|c| c.is_control() && c != '\t');
+    if !name_ok || !value_ok {
+        return Err(HttpError::BadRequest("a header with a line break, a control character or a bad name".into()));
+    }
+    if MANAGED_HEADERS.iter().any(|m| name.eq_ignore_ascii_case(m)) {
+        return Err(HttpError::BadRequest(format!("the `{name}` header is set by the client")));
+    }
+    Ok(())
+}
+
 /// Send `GET url` with extra `headers` and read the status line and headers.
 pub fn get(url: &Url, headers: &[(&str, String)], limits: &Limits) -> Result<Response, HttpError> {
-    let mut req = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: LightCraft/{}\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
-        url.path,
-        url.host_header(),
+    request(Request { method: "GET", url, headers, body: Body::None }, limits)
+}
+
+/// Send `req` and read the status line and headers; the body is read with [`Response::read`] or
+/// [`Response::read_all`]. Redirects are not followed (the caller decides whether credentials
+/// may go along). One request per connection.
+pub fn request(req: Request<'_>, limits: &Limits) -> Result<Response, HttpError> {
+    check_method(req.method)?;
+    let mut head = format!(
+        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: LightCraft/{}\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
+        req.method,
+        req.url.path,
+        req.url.host_header(),
         env!("CARGO_PKG_VERSION")
     );
-    for (k, v) in headers {
-        if v.chars().any(|c| c == '\r' || c == '\n') || k.chars().any(|c| c == '\r' || c == '\n' || c == ':') {
-            return Err(HttpError::BadUrl("header with a line break".into()));
-        }
-        req.push_str(&format!("{k}: {v}\r\n"));
+    for (k, v) in req.headers {
+        check_header(k, v)?;
+        head.push_str(&format!("{k}: {v}\r\n"));
     }
-    req.push_str("\r\n");
-    let mut stream = Stream::connect(url, limits)?;
-    stream.write_all(req.as_bytes(), limits)?;
+    let body_len = match &req.body {
+        Body::None => None,
+        Body::Bytes(b) => Some(b.len() as u64),
+        Body::Reader { len, .. } => Some(*len),
+    };
+    match body_len {
+        Some(n) => head.push_str(&format!("Content-Length: {n}\r\n")),
+        // a server wants a length even for an empty PUT or POST (nginx answers 411 without one)
+        None if matches!(req.method, "PUT" | "POST") => head.push_str("Content-Length: 0\r\n"),
+        None => {}
+    }
+    head.push_str("\r\n");
+    let mut stream = Stream::connect(req.url, limits)?;
+    stream.write_all(head.as_bytes(), limits)?;
+    match req.body {
+        Body::None => {}
+        Body::Bytes(bytes) => {
+            for piece in bytes.chunks(UPLOAD_PIECE) {
+                stream.write_all(piece, limits)?;
+            }
+        }
+        Body::Reader { len, mut reader } => {
+            let mut left = len;
+            let mut buf = vec![0u8; UPLOAD_PIECE];
+            while left > 0 {
+                if limits.cancel.load(Ordering::Relaxed) {
+                    return Err(HttpError::Cancelled);
+                }
+                let want = usize::try_from(left).unwrap_or(usize::MAX).min(buf.len());
+                let n = match reader.read(buf.get_mut(..want).unwrap_or_default()) {
+                    Ok(n) => n,
+                    Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(HttpError::Io(format!("reading the data to send: {e}"))),
+                };
+                if n == 0 {
+                    return Err(HttpError::Io("the data to send ended before its announced length".into()));
+                }
+                stream.write_all(buf.get(..n).unwrap_or_default(), limits)?;
+                left = left.saturating_sub(n as u64);
+            }
+        }
+    }
+    let head_only = req.method == "HEAD";
     let mut conn = Conn { stream, buf: Vec::new(), pos: 0 };
     let status_line = conn.line(MAX_HEAD, limits)?;
     let mut parts = status_line.split_whitespace();
@@ -496,7 +617,8 @@ pub fn get(url: &Url, headers: &[(&str, String)], limits: &Limits) -> Result<Res
         }
     }
     let find = |name: &str| headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str());
-    let body = if status == 204 || status == 304 || (100..200).contains(&status) {
+    // a HEAD response announces a length but sends no body
+    let body = if head_only || status == 204 || status == 304 || (100..200).contains(&status) {
         BodyMode::Done
     } else if find("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked")) {
         BodyMode::Chunked { left: 0, done: false }

@@ -443,7 +443,7 @@ fn http_fail(e: HttpError) -> Fail {
     match e {
         HttpError::Cancelled => Fail::Cancelled,
         HttpError::Stalled | HttpError::Io(_) | HttpError::Protocol(_) => Fail::Retry(e.to_string()),
-        HttpError::BadUrl(_) | HttpError::Connect(_) | HttpError::Tls(_) => Fail::NextMirror(e.to_string()),
+        HttpError::BadUrl(_) | HttpError::BadRequest(_) | HttpError::Connect(_) | HttpError::Tls(_) => Fail::NextMirror(e.to_string()),
     }
 }
 
@@ -465,3 +465,5 @@ fn parse_content_range(v: &str) -> Option<(u64, Option<u64>)> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_request;
