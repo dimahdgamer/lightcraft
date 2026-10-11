@@ -11,5 +11,9 @@ workspace = true
 [dependencies]
 quick-xml = { workspace = true }
 
+# transfers run natively only (lightcraft-fetch is empty on wasm32)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+lightcraft-fetch = { workspace = true }
+
 [dev-dependencies]
 proptest = { workspace = true }

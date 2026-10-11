@@ -3376,6 +3376,7 @@ dependencies = [
 name = "lightcraft-nextcloud"
 version = "0.6.0"
 dependencies = [
+ "lightcraft-fetch",
  "proptest",
  "quick-xml 0.38.4",
 ]
