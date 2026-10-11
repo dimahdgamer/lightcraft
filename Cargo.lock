@@ -3373,6 +3373,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lightcraft-nextcloud"
+version = "0.6.0"
+dependencies = [
+ "proptest",
+ "quick-xml 0.38.4",
+]
+
+[[package]]
 name = "lightcraft-pipeline"
 version = "0.6.0"
 dependencies = [
