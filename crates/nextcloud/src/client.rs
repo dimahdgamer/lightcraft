@@ -29,6 +29,7 @@ use lightcraft_fetch::http::{self, Body, HttpError, Limits, Request, Response, U
 use crate::auth::Credentials;
 use crate::dav::{self, DavError, DavRoot, Depth, Entry, Listing};
 use crate::path::{PathError, RemotePath};
+use crate::plan::same_etag;
 
 /// Timeouts and size limits.
 #[derive(Clone, Debug)]
@@ -170,6 +171,16 @@ pub enum Precondition {
     Replace(String),
 }
 
+impl From<&crate::plan::Replaces> for Precondition {
+    fn from(r: &crate::plan::Replaces) -> Self {
+        match r {
+            crate::plan::Replaces::Nothing => Precondition::Create,
+            crate::plan::Replaces::Version(etag) => Precondition::Replace(etag.clone()),
+            crate::plan::Replaces::Unchecked => Precondition::Overwrite,
+        }
+    }
+}
+
 /// What the server reported after an upload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Uploaded {
@@ -226,11 +237,6 @@ fn parse_content_range(v: &str) -> Option<(u64, Option<u64>)> {
     let (range, total) = rest.split_once('/')?;
     let start = range.split_once('-')?.0.trim().parse().ok()?;
     Some((start, total.trim().parse().ok()))
-}
-
-/// Compare two ETags, ignoring a weak-validator prefix.
-fn same_etag(a: &str, b: &str) -> bool {
-    a.trim().trim_start_matches("W/") == b.trim().trim_start_matches("W/")
 }
 
 /// 64-bit FNV-1a, to put a version's ETag into a file name.

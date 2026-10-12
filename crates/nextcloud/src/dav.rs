@@ -656,6 +656,35 @@ mod tests {
         assert_eq!(by_name(&l, "/Photos/absolute.cr2").size, 26_214_400, "an absolute address is read by its path");
     }
 
+    /// Eight entries taken from a real Nextcloud 34 answer (names replaced by neutral ones, all
+    /// else as the server wrote it: element order, `&quot;` in ETags, `%20`, the 404 propstat of
+    /// the folder, an `.ARW`, a script, `.JPG` and `.jpeg`).
+    const REAL: &str = include_str!("../tests/fixtures/photos-propfind-excerpt.xml");
+
+    #[test]
+    fn parses_an_answer_captured_from_a_real_nextcloud() {
+        let r = root();
+        let l = parse_multistatus(REAL.as_bytes(), &r).unwrap();
+        assert_eq!((l.entries.len(), l.skipped_total), (8, 0));
+        let top = by_name(&l, "/Photos");
+        assert!(top.is_dir && top.can_write());
+        assert_eq!((top.size, top.file_id.as_deref(), top.permissions.as_deref()), (22_622_440_273, Some("5"), Some("RGDNVCK")));
+        assert_eq!((top.etag.as_deref(), top.modified), (Some("\"6ac665e9070dd\""), Some(1_791_387_113)));
+        assert_eq!(by_name(&l, "/Photos/Folder 1").size, 10_065_200_687);
+        let raw = by_name(&l, "/Photos/IMG_0005.ARW");
+        assert_eq!(
+            (raw.is_dir, raw.size, raw.content_type.as_deref(), raw.modified),
+            (false, 20_915_200, Some("image/x-dcraw"), Some(1_753_883_354))
+        );
+        assert_eq!(by_name(&l, "/Photos/Sample 3.jpg").size, 6_901_504, "%20 in the address is a space in the name");
+        assert!(l.entries.iter().filter(|e| !e.is_dir).all(|e| e.etag.is_some() && e.modified.is_some() && e.file_id.is_some() && e.can_write()));
+        // every address round-trips: what the client would request for an entry is what the server wrote
+        for e in &l.entries {
+            let url = r.url_path(&e.path, e.is_dir);
+            assert!(REAL.contains(&format!("<d:href>{url}</d:href>")), "{url}");
+        }
+    }
+
     #[test]
     fn write_permission_follows_the_letters() {
         let entry = |is_dir: bool, permissions: Option<&str>| Entry {

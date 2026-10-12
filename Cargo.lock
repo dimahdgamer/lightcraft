@@ -3379,6 +3379,8 @@ dependencies = [
  "lightcraft-fetch",
  "proptest",
  "quick-xml 0.38.4",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

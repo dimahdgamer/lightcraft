@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5b5dce03b6f62759e039358f056c4f0c732bc6027697ea96f17ad82142c7b174 # shrinks to worlds = [World { local: Some((0, 2)), remote: Some((None, 0, None)), base: Some((None, 0, 0)) }]
+cc c074bbaa6a0a2dbc12190eb5fca2ed79e2c48a24f325b35189d0744447e79037 # shrinks to worlds = [World { local: Some((2, 0)), remote: Some((None, 0, None)), base: Some((Some(0), 1, 0)) }]

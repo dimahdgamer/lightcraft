@@ -13,7 +13,9 @@ pub mod auth;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod client;
 pub mod dav;
+pub mod pair;
 pub mod path;
+pub mod plan;
 
 // two attributes, not `cfg(all(test, …))`: clippy only treats a `cfg(test)` module as test code
 #[cfg(test)]
@@ -24,4 +26,6 @@ pub use auth::{AuthError, Credentials};
 #[cfg(not(target_arch = "wasm32"))]
 pub use client::{Client, ClientError, Options, Precondition, Remote, Uploaded};
 pub use dav::{DavError, DavRoot, Depth, Entry, Listing, Skipped};
+pub use pair::{FolderPair, State};
 pub use path::{PathError, RemotePath};
+pub use plan::{Action, Base, Conflict, LocalFile, Plan, RemoteFile, Replaces};

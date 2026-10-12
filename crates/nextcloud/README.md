@@ -25,5 +25,15 @@ or a disk, so it builds for wasm32 and is tested without a server:
     it fails with `SourceChanged` if the file changed while it was sent.
   - Tested against a small in-memory WebDAV server on 127.0.0.1, never the internet.
 
+- `plan`: pure functions that decide what to transfer. For each file the local state, the server's state and
+  the state recorded after the last transfer are compared: changed here only is an upload that must find the
+  version it saw (`If-Match`), changed on the server only is a download, changed on both sides or
+  deleted-on-one-side-and-changed-on-the-other is a **conflict** and moves nothing, and a deletion is only
+  reported, never carried out. Property tests check that following a plan converges and that a conflict
+  never changes either side.
+- `pair`: `FolderPair` (a server folder and a local folder, mapping paths both ways without ever leaving
+  either), the record of what both sides looked like (`State`, JSON, read back as untrusted input), and
+  `scan_local` (bounded, symlinks not followed).
+
 Everything a server sends is hostile input: tests include damaged copies of a real-shaped answer,
 random bytes, hostile addresses and names, and checks that no accepted path escapes its folder.
