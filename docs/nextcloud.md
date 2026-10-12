@@ -157,6 +157,17 @@ Limits: previews are sent one after the other; a photo outside the pack's folder
   are loopback-only and have no authentication, see [control-protocol.md](control-protocol.md)): an agent
   with that access can use a server the library is connected to, but cannot read the password back.
 
+## A bad network
+
+A connection that drops (Wi-Fi gone, laptop closed) ends the run with an error and leaves the record as it
+was; the next run starts again where things stand. A download that is cut off stays as its `.part-…` file and
+the next run asks only for the rest, as long as the server's version is the same. If the server stored an
+upload but its answer never arrived, or the app was closed after a download but before the record was
+saved, both sides now hold the same file (same size and time) and the next run recognises that and records
+it instead of reporting a conflict. Two edits that merely have the same size are still a conflict. Such a
+download is then not read into the catalog by the sync; *Synchronize Folder* does that, as for any sidecar
+changed from outside.
+
 ## Speed
 
 Listing a folder of 2,400 photos took about six seconds on a Raspberry Pi 4, so a folder is listed only when

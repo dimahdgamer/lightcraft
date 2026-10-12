@@ -385,3 +385,90 @@ fn a_path_outside_the_pair_or_a_folder_is_refused() {
     assert!(matches!(decide(&mut s, "/Elsewhere/x.xmp", Keep::Local), Err(ClientError::BadServer(_))));
     assert!(matches!(decide(&mut s, "/Photos/sub", Keep::Server), Err(ClientError::Io(_))));
 }
+
+// ---- a bad network: the Wi-Fi goes away in the middle of a run
+
+fn run_result(s: &mut Setup) -> Result<Report, ClientError> {
+    sync_pair(&s.fake.client(), &s.pair, &mut s.state, is_sidecar, &no_cancel(), &mut |_| {})
+}
+
+fn part_files(dir: &TempDir) -> Vec<String> {
+    let found = std::fs::read_dir(&dir.0).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned());
+    found.filter(|n| n.contains(".part-")).collect()
+}
+
+#[test]
+fn a_connection_that_drops_ends_the_run_and_the_next_one_finishes_it() {
+    let mut s = in_step();
+    s.local("a.xmp", b"A, edited", T0 + 1000);
+    s.fake.state.lock().unwrap().offline = true;
+    let before = s.state.clone();
+    assert!(matches!(run_result(&mut s), Err(ClientError::Network(_))));
+    assert_eq!(s.state, before, "nothing was recorded that did not happen");
+    s.fake.state.lock().unwrap().offline = false;
+    let r = s.run();
+    assert_eq!(names(&r.uploaded), ["/Photos/a.xmp"]);
+    assert!(r.is_clean());
+}
+
+#[test]
+fn a_download_that_is_cut_off_ends_the_run_and_the_next_one_resumes_it() {
+    let mut s = setup();
+    let data = pattern(60_000);
+    s.fake.put_at("Photos/big.xmp", &data, T0 + 5);
+    s.fake.state.lock().unwrap().cut_next_get = Some(20_000);
+    assert!(matches!(run_result(&mut s), Err(ClientError::Network(_))));
+    assert!(!s.dir.path("big.xmp").exists(), "a half file never takes the real name");
+    assert_eq!(part_files(&s.dir).len(), 1);
+    assert!(s.state.files().is_empty());
+    s.fake.clear_requests();
+    let r = s.run();
+    assert_eq!(names(&r.downloaded), ["/Photos/big.xmp"]);
+    assert_eq!(s.read("big.xmp"), data);
+    assert!(s.fake.requests().iter().any(|r| r.method == "GET" && r.header("range").is_some()), "the rest was asked for, not the whole file");
+    assert!(part_files(&s.dir).is_empty());
+}
+
+#[test]
+fn a_lost_answer_after_an_upload_is_not_taken_for_a_conflict_next_time() {
+    let mut s = in_step();
+    s.local("a.xmp", b"A, mine", T0 + 1000);
+    s.fake.state.lock().unwrap().lose_next_put_answer = true;
+    let before = s.state.clone();
+    assert!(matches!(run_result(&mut s), Err(ClientError::Network(_))));
+    assert_eq!(s.fake.file("Photos/a.xmp").unwrap(), b"A, mine", "the server did store it");
+    assert_eq!(s.state.files(), before.files(), "but this side never heard so");
+    assert!(!s.state.is_complete(), "and the quick check stays off until a run finishes");
+    // both sides now hold the very same file: that is not a conflict
+    let r = s.run();
+    assert!(r.conflicts.is_empty(), "{:?}", r.conflicts);
+    assert_eq!(names(&r.adopted), ["/Photos/a.xmp"]);
+    assert!(r.uploaded.is_empty() && r.is_clean());
+    assert!(!s.run().listed, "and the pair is in step for the quick check again");
+    // and the next edit is sent as usual
+    s.local("a.xmp", b"A, mine again", T0 + 2000);
+    assert_eq!(names(&s.run().uploaded), ["/Photos/a.xmp"]);
+}
+
+#[test]
+fn a_download_that_was_written_but_not_recorded_is_not_taken_for_a_conflict_next_time() {
+    let mut s = in_step();
+    s.fake.put_at("Photos/sub/b.xmp", b"BB from the server", T0 + 500);
+    let before = s.state.clone();
+    assert_eq!(names(&s.run().downloaded), ["/Photos/sub/b.xmp"]);
+    // the app was closed before the record reached the disk
+    s.state = before;
+    let r = s.run();
+    assert!(r.conflicts.is_empty(), "{:?}", r.conflicts);
+    assert_eq!(names(&r.adopted), ["/Photos/sub/b.xmp"]);
+    assert_eq!(s.read("sub/b.xmp"), b"BB from the server");
+}
+
+#[test]
+fn two_different_files_are_still_a_conflict_even_when_they_are_the_same_size() {
+    let mut s = in_step();
+    // same size, but not the same time: two edits, not one that was sent twice
+    s.local("a.xmp", b"X", T0 + 1000);
+    s.fake.put_at("Photos/a.xmp", b"Y", T0 + 1001);
+    assert_eq!(s.run().conflicts, [(rp("/Photos/a.xmp"), Conflict::BothChanged)]);
+}

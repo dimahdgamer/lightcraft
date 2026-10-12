@@ -105,8 +105,8 @@ pub enum Action {
     Upload { replaces: Replaces },
     /// Fetch the server's file over the local one (or to a new place).
     Download,
-    /// Both sides already hold the same file (equal size and time) and nothing is recorded:
-    /// record it, transfer nothing.
+    /// Both sides already hold the same file (equal size and time), whether nothing is recorded or
+    /// both moved on to it (a transfer that finished without being recorded): record it, transfer nothing.
     Adopt,
     /// Needs a decision; nothing is transferred or overwritten.
     Conflict(Conflict),
@@ -179,6 +179,9 @@ fn decide(local: Option<&LocalFile>, remote: Option<&RemoteFile>, base: Option<&
                 Some(Action::Upload { replaces: b.etag.clone().or_else(|| r.etag.clone()).map_or(Replaces::Unchecked, Replaces::Version) })
             }
             (false, true) => Some(Action::Download),
+            // both moved on, but to the very same file: a transfer that finished without being recorded
+            // (the answer to an upload was lost, or the app was closed after a download)
+            (true, true) if same_file(l, r) => Some(Action::Adopt),
             (true, true) => Some(Action::Conflict(Conflict::BothChanged)),
         },
     }
@@ -249,6 +252,10 @@ mod tests {
         assert_eq!(one(Some(lf(10, 100)), Some(rf("\"v2\"", 14, 200)), b()), Some(Download));
         // both changed
         assert_eq!(one(Some(lf(12, 105)), Some(rf("\"v2\"", 14, 200)), b()), Some(Action::Conflict(BothChanged)));
+        // both changed, to the very same file (an upload whose answer was lost, a download that was not
+        // recorded): nothing to decide. The same size at another time is two edits.
+        assert_eq!(one(Some(lf(14, 200)), Some(rf("\"v2\"", 14, 200)), b()), Some(Adopt));
+        assert_eq!(one(Some(lf(14, 201)), Some(rf("\"v2\"", 14, 200)), b()), Some(Action::Conflict(BothChanged)));
         // deleted on one side
         assert_eq!(one(Some(lf(10, 100)), None, b()), Some(RemoteDeleted));
         assert_eq!(one(None, Some(rf("\"v1\"", 10, 100)), b()), Some(LocalDeleted));

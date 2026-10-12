@@ -3,7 +3,7 @@
 //! `PROPFIND` (depth 0 and 1) with ETags, modification times and folder ETags that change when
 //! anything below changes, `GET` with `Range`/`If-Range`, `PUT` with `If-Match`/`If-None-Match`
 //! and `X-OC-Mtime`, `MKCOL` and `DELETE`, plus switches to misbehave (redirect, ignore ranges,
-//! cut a download short).
+//! cut a download short, drop every connection, lose the answer to an upload).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -55,6 +55,10 @@ pub struct State {
     pub ignore_range: bool,
     /// The next GET announces the whole file but sends only this many bytes.
     pub cut_next_get: Option<usize>,
+    /// Every request is read and then the connection is closed without an answer: the Wi-Fi is gone.
+    pub offline: bool,
+    /// The next PUT is stored, but the connection is closed without telling the client.
+    pub lose_next_put_answer: bool,
 }
 
 impl State {
@@ -238,6 +242,9 @@ fn serve(mut s: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
 
     let mut st = state.lock().unwrap();
     st.requests.push(req.clone());
+    if st.offline {
+        return Ok(());
+    }
     if st.redirect {
         respond(&mut s, "302 Found", &[("Location", "http://other.example/".into())], b"");
         return Ok(());
@@ -316,6 +323,9 @@ fn serve(mut s: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                     let mtime = req.header("x-oc-mtime").and_then(|v| v.parse().ok()).unwrap_or(MTIME);
                     st.files.insert(rel.clone(), FileData { data: body, etag: etag.clone(), mtime });
                     st.touch_above(&rel);
+                    if std::mem::take(&mut st.lose_next_put_answer) {
+                        return Ok(());
+                    }
                     respond(&mut s, if existing.is_some() { "204 No Content" } else { "201 Created" }, &[("ETag", etag)], b"");
                 }
             }
