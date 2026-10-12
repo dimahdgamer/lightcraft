@@ -113,6 +113,11 @@ pub use native::{MemorySecrets, SecretStore};
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Nextcloud {
+    /// Whether a job that talks to a server is running.
+    pub fn running(&self) -> bool {
+        self.rt.running()
+    }
+
     /// Where app passwords are kept beyond this session (the desktop app installs the system's
     /// credential store). Until then they live in memory only.
     pub fn set_secret_store(&mut self, store: std::sync::Arc<dyn SecretStore>) {

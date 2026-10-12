@@ -760,6 +760,17 @@ pub struct NameEdit {
     pub fresh: bool,
 }
 
+/// A secret being typed (an app password): shown as dots, and never in debug output or in the
+/// control channel's view of the dialog.
+#[derive(Clone, Default, PartialEq)]
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(<hidden>)")
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Dialog {
@@ -992,6 +1003,21 @@ pub enum Dialog {
         relink_moved: bool,
         remove_missing: bool,
         read_metadata: bool,
+    },
+    /// Nextcloud: the connection, the folder pairs and the last job (`nextcloud.*`; see
+    /// [`crate::nextcloud_ui`]).
+    Nextcloud {
+        url: String,
+        user: String,
+        /// The app password being typed.
+        #[serde(skip)]
+        password: Secret,
+        remember: bool,
+        remote: String,
+        local: String,
+        /// The engine's `nextcloud.status`, refreshed every frame while the dialog is open.
+        #[serde(skip)]
+        status: serde_json::Value,
     },
     About,
     Shortcuts,

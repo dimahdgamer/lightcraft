@@ -24,6 +24,8 @@ pub mod menubar;
 pub mod menus;
 pub mod merge;
 mod model_setup;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod nextcloud_ui;
 pub mod panels;
 pub mod pick;
 pub mod region;
@@ -93,6 +95,9 @@ mod tests_masking;
 mod tests_masking_layout;
 #[cfg(test)]
 mod tests_menubar;
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod tests_nextcloud;
 #[cfg(test)]
 mod tests_offline;
 #[cfg(test)]
@@ -1003,6 +1008,8 @@ impl LightcraftApp {
         import::tick(self, ctx);
         lightroom_import::tick(self, ctx);
         tasks::poll(self, ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        nextcloud_ui::poll(self, ctx);
         self.preview_build_status(ctx);
         self.save_status(ctx);
         self.slideshow_tick(ctx);

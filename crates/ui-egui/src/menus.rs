@@ -179,6 +179,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("file.findMissing", "Find Missing Photos…", None, "File"),
     ("file.backupLibrary", "Back Up Library…", None, "File"),
     ("file.restoreLibrary", "Restore Library from Backup…", None, "File"),
+    ("app.nextcloud", "Nextcloud…", None, "File"),
     ("photo.locate", "Locate Missing File…", None, ""),
     ("dialog.saveMetadataPreset", "Save Metadata Preset…", None, ""),
     ("app.quit", "Quit LightCraft", Some("Cmd+Q"), "File"),
@@ -1217,6 +1218,10 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             app.ui.dialog = Some(Dialog::About);
             Ok(Value::Null)
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        "app.nextcloud" => crate::nextcloud_ui::open(app),
+        #[cfg(target_arch = "wasm32")]
+        "app.nextcloud" => Err("Nextcloud isn't available in the browser version".to_string()),
         "photo.editInPhotoCraft" => edit_in(app, &ctx, p, true),
         "photo.editInExternal" => edit_in(app, &ctx, p, false),
         "dialog.cull" => {

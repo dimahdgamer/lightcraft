@@ -32,6 +32,8 @@ lightcraft-denoise = { workspace = true, features = ["runtime"] }
 lightcraft-codecs = { workspace = true }
 lightcraft-faces = { workspace = true }
 lightcraft-merge = { workspace = true }
+# an in-memory WebDAV server for the Nextcloud dialog tests
+lightcraft-nextcloud = { workspace = true, features = ["test-server"] }
 
 [build-dependencies]
 serde_json = { workspace = true }

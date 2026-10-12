@@ -1,6 +1,6 @@
 # Nextcloud
 
-> **Last updated:** 2026-10-12 · **Status:** engine commands, applying downloads, automatic sync and conflict decisions, with tests; the desktop dialogs are not built yet.
+> **Last updated:** 2026-10-12 · **Status:** engine commands, applying downloads, automatic sync, conflict decisions, the dialog in the desktop app and (Windows) remembering the app password, with tests.
 
 Keeps XMP sidecars (and nothing else) in step between a folder of a library and a folder on a Nextcloud
 server, so edits made on one machine arrive on the other. Originals are never uploaded or changed.
@@ -20,6 +20,21 @@ that record has changed:
 
 Two sidecars named alike on both sides that differ and have no record yet are also a conflict. The decision
 logic is `lightcraft_nextcloud::plan`, pure functions with property tests.
+
+## In the app
+
+**File ▸ Nextcloud…** opens one dialog: the connection (address, user name, app password), the folder pairs
+(*Server folder* and *On this computer*, with *Choose…*), *Sync by itself*, *Sync now*, and what the last sync
+did. A conflict is listed with **Keep this computer's** and **Keep the server's**. Buttons wait while a job
+runs; the same job shows as a row in the activity stack. Everything the dialog does is a `nextcloud.*`
+command. The app calls `Session::nextcloud_tick` every frame (see below), so the automatic sync works with
+the dialog closed. The password field shows dots, and the password is cleared from the dialog as soon as
+the engine has it; it is not in the dialog's debug text, nor in what the control channel can read.
+
+On **Windows** the app password is remembered in the Credential Manager (a generic credential named
+`<user>@<address>.LightCraft Nextcloud`, readable by your Windows user only) when *Remember the app password
+on this computer* is ticked. Elsewhere it is kept until LightCraft is closed, and the dialog says so. The
+web build has no Nextcloud.
 
 ## Setting up
 
@@ -111,6 +126,6 @@ no conflict, failure or reported deletion.
 
 ## Not yet
 
-The dialogs of the desktop app (and a frontend that calls `nextcloud_tick`), remembering the password in the
-system's credential store, keeping both sides of a conflict, and the travel pack (smart previews and a
-manifest, to edit without the originals).
+Remembering the password in the macOS Keychain and the Linux secret service (the Windows store is done),
+keeping both sides of a conflict, translations of the dialog beyond German, and the travel pack (smart previews
+and a manifest, to edit without the originals).

@@ -264,7 +264,10 @@ pub(crate) fn start_sync(s: &mut Session, which: Option<&str>, preview: bool) ->
         jobs.push(PairJob { pair, client, states: states.clone() });
     }
     let label = if preview { "Checking Nextcloud" } else { "Syncing with Nextcloud" };
-    s.nextcloud.rt.start(&s.activity, "sync", label, move |cancel, progress| run_pairs(jobs, preview, cancel, progress)).map_err(other)
+    let job = s.nextcloud.rt.start(&s.activity, "sync", label, move |cancel, progress| run_pairs(jobs, preview, cancel, progress)).map_err(other)?;
+    // any sync counts for the automatic one's interval, so it does not start right after a manual one
+    s.nextcloud.rt.last_start = Some(web_time::Instant::now());
+    Ok(job)
 }
 
 fn sync(s: &mut Session, p: &Value) -> Result<Value> {

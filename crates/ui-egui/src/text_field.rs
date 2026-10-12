@@ -60,6 +60,7 @@ pub struct TextField<'a> {
     align: Option<egui::Align>,
     margin: Option<egui::Margin>,
     rows: Option<usize>,
+    password: bool,
 }
 
 /// The egui id of the field registered as `widget`, to give it the focus (⌘F to search).
@@ -90,7 +91,14 @@ impl<'a> TextField<'a> {
             align: None,
             margin: None,
             rows: None,
+            password: false,
         }
+    }
+
+    /// Show the text as dots, and never copy it (a one-line field only).
+    pub fn password(mut self, on: bool) -> Self {
+        self.password = on && !self.multiline;
+        self
     }
 
     /// A multi-line field: Return starts a new line; leaving the field ends the edit.
@@ -183,7 +191,7 @@ impl<'a> TextField<'a> {
             }
         }
         let mut edit = if self.multiline { egui::TextEdit::multiline(self.text) } else { egui::TextEdit::singleline(self.text) };
-        edit = edit.id(id);
+        edit = edit.id(id).password(self.password);
         if let Some(hint) = self.hint {
             edit = edit.hint_text(hint);
         }

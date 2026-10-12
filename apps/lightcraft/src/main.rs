@@ -32,6 +32,8 @@ mod logging;
 mod native_menu;
 #[cfg(target_os = "macos")]
 mod screen_profile;
+#[cfg(windows)]
+mod secrets;
 mod window_gpu;
 
 use dialog_filter::FileDialogExt as _;
@@ -594,6 +596,11 @@ fn services(cc: &eframe::CreationContext<'_>, log_file: Option<&std::path::Path>
 /// The library session with the folder face models are kept in (`<config>/models`).
 fn open_session(in_memory: bool, dir: Option<std::path::PathBuf>, seed_demo: bool) -> (Session, Option<LibraryProblem>) {
     let (mut s, problem) = open_library_session(in_memory, dir, seed_demo);
+    // the Nextcloud app password is kept in the system's credential store, where there is one
+    #[cfg(windows)]
+    if let Some(store) = secrets::SystemSecrets::install() {
+        s.nextcloud.set_secret_store(store);
+    }
     s.face_models_dir = lightcraft_engine::config::default_face_models_dir();
     // Control requests are answered on the UI thread: Add to Apple Photos must not wait there
     s.apple_photos_background = true;

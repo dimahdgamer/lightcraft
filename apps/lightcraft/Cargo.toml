@@ -40,6 +40,11 @@ winit = { version = "0.30", default-features = false, features = ["x11"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = { workspace = true }
 
+# the Nextcloud app password in the Windows Credential Manager (see src/secrets.rs)
+[target.'cfg(windows)'.dependencies]
+keyring-core = "1"
+windows-native-keyring-store = { version = "1", default-features = false }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { workspace = true }
 

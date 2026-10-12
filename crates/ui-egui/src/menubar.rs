@@ -92,6 +92,8 @@ const LAYOUT: &[(&str, &[&str])] = &[
             "library.toggleAutoWriteXmp",
             "@Previews",
             "---",
+            "app.nextcloud",
+            "---",
             "app.quit",
         ],
     ),

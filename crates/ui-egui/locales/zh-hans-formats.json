@@ -244,5 +244,8 @@
   "not added to Apple Photos: {e}": "未添加到 Apple 照片：{e}",
   "{n} added to Apple Photos album “{album}”": "已将 {n} 个添加到 Apple 照片相册“{album}”",
   "{n} added to Apple Photos": "已将 {n} 个添加到 Apple 照片",
-  "{n} photos opened for editing; each is stacked with its original": "已打开 {n} 张照片进行编辑；每张都与其原片堆叠在一起"
+  "{n} photos opened for editing; each is stacked with its original": "已打开 {n} 张照片进行编辑；每张都与其原片堆叠在一起",
+  "Signed in as {user}.": "Signed in as {user}.",
+  "Sent {sent}, received {got}.": "Sent {sent}, received {got}.",
+  "{n} photos updated from what arrived.": "{n} photos updated from what arrived."
 }
