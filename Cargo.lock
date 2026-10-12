@@ -3233,6 +3233,7 @@ dependencies = [
  "lightcraft-lensdb",
  "lightcraft-merge",
  "lightcraft-meta",
+ "lightcraft-nextcloud",
  "lightcraft-pipeline",
  "lightcraft-preview",
  "lightcraft-raster",

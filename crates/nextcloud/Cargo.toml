@@ -17,5 +17,9 @@ serde_json = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 lightcraft-fetch = { workspace = true }
 
+[features]
+# An in-memory WebDAV server on 127.0.0.1 for tests of the crates above this one.
+test-server = []
+
 [dev-dependencies]
 proptest = { workspace = true }

@@ -17,21 +17,21 @@ use crate::client::{Client, Options};
 use crate::dav::DavRoot;
 use crate::path::{RemotePath, decode_segment};
 
-pub(crate) const USER: &str = "dima";
-pub(crate) const SECRET: &str = "app-pw-123-secret";
+pub const USER: &str = "dima";
+pub const SECRET: &str = "app-pw-123-secret";
 const PREFIX: &str = "/remote.php/dav/files/dima/";
 /// The modification time files get unless another is given: Sun, 11 Oct 2026 10:00:00 GMT.
-pub(crate) const MTIME: i64 = 1_791_712_800;
+pub const MTIME: i64 = 1_791_712_800;
 
 #[derive(Clone)]
-pub(crate) struct FileData {
+pub struct FileData {
     pub data: Vec<u8>,
     pub etag: String,
     pub mtime: i64,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Req {
+pub struct Req {
     pub method: String,
     pub path: String,
     pub headers: Vec<(String, String)>,
@@ -44,7 +44,7 @@ impl Req {
 }
 
 #[derive(Default)]
-pub(crate) struct State {
+pub struct State {
     pub files: BTreeMap<String, FileData>,
     /// Folders by path without leading or trailing `/` (`""` is the top folder) and their ETags,
     /// which change whenever anything below them changes.
@@ -82,7 +82,7 @@ impl State {
     }
 }
 
-pub(crate) struct Fake {
+pub struct Fake {
     pub url: String,
     pub state: Arc<Mutex<State>>,
 }
@@ -190,7 +190,7 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 }
 
 /// `Sun, 11 Oct 2026 10:00:00 GMT`.
-pub(crate) fn http_date(secs: i64) -> String {
+pub fn http_date(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
     let (y, m, d) = civil_from_days(days);
@@ -347,7 +347,13 @@ fn serve(mut s: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
 }
 
 /// A folder for test files, removed when dropped.
-pub(crate) struct TempDir(pub PathBuf);
+pub struct TempDir(pub PathBuf);
+
+impl Default for TempDir {
+    fn default() -> Self {
+        TempDir::new()
+    }
+}
 
 impl TempDir {
     pub fn new() -> TempDir {
@@ -390,22 +396,22 @@ impl Drop for TempDir {
     }
 }
 
-pub(crate) fn pattern(n: usize) -> Vec<u8> {
+pub fn pattern(n: usize) -> Vec<u8> {
     (0..n as u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 11) as u8).collect()
 }
 
-pub(crate) fn no_cancel() -> AtomicBool {
+pub fn no_cancel() -> AtomicBool {
     AtomicBool::new(false)
 }
 
-pub(crate) fn rp(s: &str) -> RemotePath {
+pub fn rp(s: &str) -> RemotePath {
     RemotePath::parse(s).unwrap()
 }
 
-pub(crate) fn silent(_: u64, _: u64) {}
+pub fn silent(_: u64, _: u64) {}
 
 /// All the folder paths the server has, for assertions.
-pub(crate) fn dir_names(fake: &Fake) -> BTreeSet<String> {
+pub fn dir_names(fake: &Fake) -> BTreeSet<String> {
     fake.state.lock().unwrap().dirs.keys().cloned().collect()
 }
 

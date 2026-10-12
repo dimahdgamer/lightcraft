@@ -28,6 +28,8 @@ mod masks;
 mod merge;
 pub mod metadata;
 pub mod missing;
+#[cfg(not(target_arch = "wasm32"))]
+mod nextcloud;
 mod organize;
 mod prefs;
 mod preset_files;
@@ -166,6 +168,8 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(face_detect::specs());
         v.extend(face_recognize::specs());
         v.extend(activity::specs());
+        #[cfg(not(target_arch = "wasm32"))]
+        v.extend(nextcloud::specs());
         v
     })
 }

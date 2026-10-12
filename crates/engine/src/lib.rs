@@ -52,6 +52,7 @@ pub mod media;
 pub mod memory;
 pub mod merge;
 mod model_download;
+pub mod nextcloud;
 pub mod originals;
 pub mod preset_import;
 pub mod preset_luminar;
@@ -286,6 +287,8 @@ pub struct Session {
     pub activity: activity::Activity,
     /// The last (or running) Build Previews.
     pub preview_build: Option<std::sync::Arc<cmd::previews::PreviewBuild>>,
+    /// The Nextcloud servers and folder pairs of the library, and the job that talks to a server.
+    pub nextcloud: nextcloud::Nextcloud,
     /// Develop defaults applied on import (persisted in prefs.json).
     pub import_defaults: import::ImportDefaults,
     /// Disk budget of the library's thumbnail cache in MB (0 = default; persisted in prefs.json).
@@ -386,6 +389,7 @@ impl Session {
             folder_changes: None,
             activity: Default::default(),
             preview_build: None,
+            nextcloud: Default::default(),
             import_defaults: import::ImportDefaults::default(),
             cache_mb: 0,
             smart_previews_dir: None,
@@ -1012,6 +1016,9 @@ mod tests_library;
 mod tests_lightroom_folder;
 #[cfg(test)]
 mod tests_merge;
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod tests_nextcloud;
 #[cfg(test)]
 mod tests_organize;
 #[cfg(test)]

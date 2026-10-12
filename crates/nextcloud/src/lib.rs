@@ -26,9 +26,11 @@ mod client_tests;
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod sync_tests;
-#[cfg(test)]
+// test support, also for the crates above this one (feature `test-server`): not production code
+#[cfg(any(test, feature = "test-server"))]
 #[cfg(not(target_arch = "wasm32"))]
-mod testserver;
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+pub mod testserver;
 
 pub use auth::{AuthError, Credentials};
 #[cfg(not(target_arch = "wasm32"))]
