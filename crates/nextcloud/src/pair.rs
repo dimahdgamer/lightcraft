@@ -102,17 +102,44 @@ impl std::error::Error for StateError {}
 struct Record {
     version: u32,
     files: BTreeMap<String, Base>,
+    #[serde(default)]
+    folders: BTreeMap<String, String>,
+    #[serde(default)]
+    complete: bool,
 }
 
-/// What both sides looked like after the last successful transfer of each file.
+/// Longest ETag kept for a folder.
+const MAX_ETAG_BYTES: usize = 1024;
+
+/// What both sides looked like after the last successful transfer of each file, and the versions
+/// of the server's folders when everything was last found in step.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct State {
     files: BTreeMap<RemotePath, Base>,
+    folders: BTreeMap<RemotePath, String>,
+    complete: bool,
 }
 
 impl State {
     pub fn files(&self) -> &BTreeMap<RemotePath, Base> {
         &self.files
+    }
+
+    /// The ETags of the server's folders at the last listing.
+    pub fn folders(&self) -> &BTreeMap<RemotePath, String> {
+        &self.folders
+    }
+
+    /// Whether the run that made this record left nothing unresolved: no conflict, no failure, no
+    /// reported deletion. Only then may an unchanged folder ETag stand for "nothing changed
+    /// below", because every file the server has is then recorded in [`Self::files`].
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    pub fn set_tree(&mut self, folders: BTreeMap<RemotePath, String>, complete: bool) {
+        self.folders = folders;
+        self.complete = complete;
     }
 
     pub fn record(&mut self, path: RemotePath, base: Base) {
@@ -125,8 +152,9 @@ impl State {
 
     pub fn to_json(&self) -> String {
         let files = self.files.iter().map(|(p, b)| (p.to_string(), b.clone())).collect();
+        let folders = self.folders.iter().map(|(p, e)| (p.to_string(), e.clone())).collect();
         // a map with string keys and plain fields always serialises
-        serde_json::to_string_pretty(&Record { version: STATE_VERSION, files }).unwrap_or_default()
+        serde_json::to_string_pretty(&Record { version: STATE_VERSION, files, folders, complete: self.complete }).unwrap_or_default()
     }
 
     /// Read a record. The number is how many entries were dropped because their path was not
@@ -136,14 +164,23 @@ impl State {
             return Err(StateError::TooLarge);
         }
         let rec: Record = serde_json::from_str(text).map_err(|e| StateError::Unreadable(e.to_string()))?;
+        let mut dropped_folders = 0usize;
         if rec.version > STATE_VERSION {
             return Err(StateError::NewerVersion(rec.version));
         }
-        if rec.files.len() > MAX_STATE_FILES {
+        if rec.files.len().saturating_add(rec.folders.len()) > MAX_STATE_FILES {
             return Err(StateError::TooMany);
         }
-        let mut state = State::default();
-        let mut dropped = 0;
+        let mut state = State { complete: rec.complete, ..State::default() };
+        for (key, etag) in rec.folders {
+            match RemotePath::parse(&key) {
+                Ok(p) if p.to_string() == key && etag.len() <= MAX_ETAG_BYTES => {
+                    state.folders.insert(p, etag);
+                }
+                _ => dropped_folders += 1,
+            }
+        }
+        let mut dropped = dropped_folders;
         for (key, base) in rec.files {
             match RemotePath::parse(&key) {
                 // a path must be written the way it is displayed, or it is not the one it names
@@ -152,6 +189,10 @@ impl State {
                 }
                 _ => dropped += 1,
             }
+        }
+        if dropped > 0 {
+            // something in the record was not trusted: do a full listing next time
+            state.complete = false;
         }
         Ok((state, dropped))
     }
@@ -296,6 +337,26 @@ mod tests {
         for no in ["IMG_0001.CR2", "xmp", ".xmp", "a.xmp.bak", "a.xmpx", "", "a."] {
             assert!(!is_sidecar(no), "{no}");
         }
+    }
+
+    #[test]
+    fn the_folder_versions_round_trip_and_old_records_still_read() {
+        let mut s = State::default();
+        s.record(p("/Photos/a.xmp"), base("\"v1\"", 10, 100));
+        s.set_tree([(RemotePath::root(), "\"r1\"".to_string()), (p("/Photos"), "\"d1\"".to_string())].into(), true);
+        let (back, dropped) = State::from_json(&s.to_json()).unwrap();
+        assert_eq!((back.clone(), dropped), (s.clone(), 0));
+        assert!(back.is_complete() && back.folders().len() == 2);
+        // a record written before folders existed has none, and is not complete
+        let old = r#"{"version":1,"files":{"/a.xmp":{"etag":null,"local":{"size":1,"modified":2}}}}"#;
+        let (s, dropped) = State::from_json(old).unwrap();
+        assert_eq!((s.files().len(), s.folders().len(), s.is_complete(), dropped), (1, 0, false, 0));
+        // a folder path that is not in its exact form is dropped, and the record no longer counts as complete
+        let bad = r#"{"version":1,"files":{},"folders":{"/a/../b":"x","/ok":"y"},"complete":true}"#;
+        let (s, dropped) = State::from_json(bad).unwrap();
+        assert_eq!((s.folders().len(), s.is_complete(), dropped), (1, false, 1));
+        let long = format!(r#"{{"version":1,"files":{{}},"folders":{{"/ok":"{}"}},"complete":true}}"#, "x".repeat(MAX_ETAG_BYTES + 1));
+        assert_eq!(State::from_json(&long).unwrap().1, 1);
     }
 
     #[test]

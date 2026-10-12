@@ -35,5 +35,12 @@ or a disk, so it builds for wasm32 and is tested without a server:
   either), the record of what both sides looked like (`State`, JSON, read back as untrusted input), and
   `scan_local` (bounded, symlinks not followed).
 
+- `sync` (native only): `prepare` (list the server, scan the local folder, plan; nothing is changed),
+  `execute` (carry the plan out with the client and record every transfer) and `sync_pair` (both). Listing a
+  big server folder is slow on a small machine (six seconds for 2,400 files on a Raspberry Pi), so it is
+  skipped when the top folder's ETag is the one recorded by the last complete run, and unchanged
+  sub-folders are skipped when it is not. A problem with one file is reported for that file; a problem
+  with the connection ends the run; the record is up to date either way.
+
 Everything a server sends is hostile input: tests include damaged copies of a real-shaped answer,
 random bytes, hostile addresses and names, and checks that no accepted path escapes its folder.

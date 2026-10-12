@@ -16,11 +16,19 @@ pub mod dav;
 pub mod pair;
 pub mod path;
 pub mod plan;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod sync;
 
 // two attributes, not `cfg(all(test, …))`: clippy only treats a `cfg(test)` module as test code
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod client_tests;
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod sync_tests;
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod testserver;
 
 pub use auth::{AuthError, Credentials};
 #[cfg(not(target_arch = "wasm32"))]

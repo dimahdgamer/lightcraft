@@ -539,7 +539,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// An HTTP date such as `Sat, 11 Oct 2026 10:00:00 GMT` as seconds since 1970-01-01 UTC. The
+/// An HTTP date such as `Sun, 11 Oct 2026 10:00:00 GMT` as seconds since 1970-01-01 UTC. The
 /// weekday is optional and not checked; only GMT/UTC is accepted. `None` for anything else.
 pub fn parse_http_date(s: &str) -> Option<i64> {
     let s = s.trim();
@@ -589,7 +589,7 @@ mod tests {
  <d:response>
   <d:href>/remote.php/dav/files/dima/Photos/</d:href>
   <d:propstat><d:prop>
-    <d:getlastmodified>Sat, 11 Oct 2026 10:00:00 GMT</d:getlastmodified>
+    <d:getlastmodified>Sun, 11 Oct 2026 10:00:00 GMT</d:getlastmodified>
     <d:resourcetype><d:collection/></d:resourcetype>
     <d:getetag>&quot;65a1b2c3d4e5f&quot;</d:getetag>
     <oc:fileid>1234</oc:fileid><oc:size>5242880</oc:size><oc:permissions>RGDNVCK</oc:permissions>
@@ -831,24 +831,24 @@ mod tests {
     #[test]
     fn http_dates() {
         assert_eq!(parse_http_date("Thu, 01 Jan 1970 00:00:00 GMT"), Some(0));
-        assert_eq!(parse_http_date("Sat, 11 Oct 2026 10:00:00 GMT"), Some(1_791_712_800));
+        assert_eq!(parse_http_date("Sun, 11 Oct 2026 10:00:00 GMT"), Some(1_791_712_800));
         assert_eq!(parse_http_date("11 oct 2026 10:00:00 UTC"), Some(1_791_712_800), "weekday optional, month case-insensitive");
         assert_eq!(parse_http_date("Tue, 29 Feb 2028 23:59:59 GMT"), Some(1_835_481_599));
         assert_eq!(parse_http_date("Fri, 31 Dec 9999 23:59:59 GMT"), Some(253_402_300_799));
         for bad in [
             "",
             "yesterday",
-            "Sat, 11 Oct 2026 10:00:00 PST",
-            "Sat, 11 Oct 2026 10:00:00",
+            "Sun, 11 Oct 2026 10:00:00 PST",
+            "Sun, 11 Oct 2026 10:00:00",
             "Sat, 31 Apr 2026 10:00:00 GMT",
             "Sat, 29 Feb 2027 10:00:00 GMT",
             "Sat, 11 Oct 1969 10:00:00 GMT",
-            "Sat, 11 Oct 2026 24:00:00 GMT",
-            "Sat, 11 Oct 2026 10:61:00 GMT",
+            "Sun, 11 Oct 2026 24:00:00 GMT",
+            "Sun, 11 Oct 2026 10:61:00 GMT",
             "Sat, 00 Oct 2026 10:00:00 GMT",
             "Sat, 11 Foo 2026 10:00:00 GMT",
-            "Sat, 11 Oct 2026 10:00:00:00 GMT",
-            "Sat, 11 Oct 2026 10:00:00 GMT extra",
+            "Sun, 11 Oct 2026 10:00:00:00 GMT",
+            "Sun, 11 Oct 2026 10:00:00 GMT extra",
         ] {
             assert_eq!(parse_http_date(bad), None, "{bad:?}");
         }
