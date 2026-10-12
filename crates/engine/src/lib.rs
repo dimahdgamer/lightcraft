@@ -1020,6 +1020,9 @@ mod tests_merge;
 #[cfg(not(target_arch = "wasm32"))]
 mod tests_nextcloud;
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod tests_nextcloud_machines;
+#[cfg(test)]
 mod tests_organize;
 #[cfg(test)]
 mod tests_persist;

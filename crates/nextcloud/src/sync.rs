@@ -326,3 +326,64 @@ pub fn sync_pair(
     let prepared = prepare(client, pair, state, select, cancel, report)?;
     execute(client, pair, state, prepared, cancel, report)
 }
+
+/// Which side to keep when a conflict is decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keep {
+    /// This machine's file replaces the server's (or restores it, if the server deleted it).
+    Local,
+    /// The server's file replaces this machine's (or restores it, if it was deleted here).
+    Server,
+}
+
+/// Decide one conflict: overwrite the other side with the one that is kept, and record the file as
+/// in step. The person chose; nothing here guesses. A side that no longer has the file cannot be
+/// kept (`NotFound`): to accept a deletion, delete the other file yourself.
+pub fn resolve(
+    client: &Client,
+    pair: &FolderPair,
+    state: &mut State,
+    path: &RemotePath,
+    keep: Keep,
+    cancel: &AtomicBool,
+    report: &mut dyn FnMut(&Event<'_>),
+) -> Result<(), ClientError> {
+    let local = pair.local_for(path).ok_or_else(|| ClientError::BadServer(format!("{path} is not inside the folder pair")))?;
+    match keep {
+        Keep::Local => {
+            if !local.is_file() {
+                return Err(ClientError::NotFound);
+            }
+            let here = disk_state(&local)?;
+            if let Some(dir) = path.parent() {
+                client.mkcol_all(&dir, cancel)?;
+            }
+            let up = client.upload(
+                path,
+                &local,
+                &Precondition::Overwrite,
+                Some(here.modified),
+                &mut |d, t| report(&Event::Transfer { path, upload: true, done: d, total: t }),
+                cancel,
+            )?;
+            let etag = match up.etag {
+                Some(e) => Some(e),
+                None => client.stat(path, cancel)?.etag,
+            };
+            state.record(path.clone(), Base { etag, local: here });
+        }
+        Keep::Server => {
+            let entry = client.stat(path, cancel)?;
+            if entry.is_dir {
+                return Err(ClientError::Io(format!("{path} is a folder on the server")));
+            }
+            let expect = Remote::from(&entry);
+            client.download(path, &local, &expect, &mut |d, t| report(&Event::Transfer { path, upload: false, done: d, total: t }), cancel)?;
+            state.record(path.clone(), Base { etag: entry.etag, local: disk_state(&local)? });
+        }
+    }
+    report(&Event::Finished { path });
+    // the folder versions noted earlier are out of date now
+    state.set_tree(BTreeMap::new(), false);
+    Ok(())
+}

@@ -49,7 +49,18 @@ pub struct NextcloudPrefs {
     pub pairs: Vec<Pair>,
     /// The number the next pair id is made from.
     pub next_pair: u32,
+    /// Sync the pairs by itself (see [`crate::Session::nextcloud_tick`]).
+    pub auto_sync: bool,
+    /// Seconds between automatic syncs (0 = the default, [`DEFAULT_INTERVAL_SECS`]).
+    pub interval_secs: u32,
 }
+
+/// How often an automatic sync looks at the server when nothing was edited.
+pub const DEFAULT_INTERVAL_SECS: u32 = 300;
+/// The shortest interval that is accepted.
+pub const MIN_INTERVAL_SECS: u32 = 30;
+/// How long after the last edit an automatic sync waits, so a burst of edits is sent once.
+pub const EDIT_QUIET_SECS: u64 = 10;
 
 /// A name a person gave (a server): 1 to 60 characters, none of them a control character.
 pub fn valid_name(s: &str) -> bool {
@@ -164,6 +175,8 @@ pub(crate) mod native {
         total: u64,
         detail: String,
         outcome: Option<Result<Value, String>>,
+        /// Local sidecars this job downloaded and the catalog has not read yet.
+        downloaded: Vec<PathBuf>,
     }
 
     struct Job {
@@ -191,6 +204,11 @@ pub(crate) mod native {
         pub fn detail(&self, text: &str) {
             self.task.detail(text);
             lock(&self.shared).detail = text.chars().take(200).collect();
+        }
+
+        /// Sidecars that arrived from the server, to be read into the catalog once the job is done.
+        pub fn add_downloaded(&self, paths: impl IntoIterator<Item = PathBuf>) {
+            lock(&self.shared).downloaded.extend(paths);
         }
     }
 
@@ -257,6 +275,13 @@ pub(crate) mod native {
         job: Option<Job>,
         next_job: u64,
         memory_states: Arc<Mutex<HashMap<String, State>>>,
+        /// What reading the last downloads into the catalog did.
+        last_apply: Option<Value>,
+        /// For the automatic sync: when it last started, the catalog's commit count when it was
+        /// last looked at, and since when the catalog has been changing.
+        pub(crate) last_start: Option<web_time::Instant>,
+        pub(crate) seen_commits: u64,
+        pub(crate) dirty_since: Option<web_time::Instant>,
     }
 
     impl Runtime {
@@ -371,6 +396,21 @@ pub(crate) mod native {
             lock(&job.shared).outcome.clone().unwrap_or_else(|| Err("the Nextcloud job ended without a result".into()))
         }
 
+        /// The sidecars the finished job downloaded, once (empty while it runs or when applied).
+        pub fn take_downloaded(&mut self) -> Vec<PathBuf> {
+            match &self.job {
+                Some(j) => {
+                    let mut s = lock(&j.shared);
+                    if s.running { Vec::new() } else { std::mem::take(&mut s.downloaded) }
+                }
+                None => Vec::new(),
+            }
+        }
+
+        pub fn record_apply(&mut self, result: Value) {
+            self.last_apply = Some(result);
+        }
+
         pub fn cancel(&self) -> bool {
             self.job.as_ref().filter(|j| lock(&j.shared).running).is_some_and(|j| {
                 j.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -383,6 +423,9 @@ pub(crate) mod native {
             let Some(j) = &self.job else { return Value::Null };
             let s = lock(&j.shared);
             let mut v = json!({"id": j.id, "kind": j.kind, "running": s.running, "done": s.done, "total": s.total, "detail": s.detail});
+            if let Some(applied) = &self.last_apply {
+                v["applied"] = applied.clone();
+            }
             match &s.outcome {
                 Some(Ok(r)) => {
                     v["ok"] = json!(true);
@@ -395,6 +438,42 @@ pub(crate) mod native {
                 None => {}
             }
             v
+        }
+    }
+
+    /// Read the downloaded sidecars into the photos they belong to: a photo's sidecar is
+    /// `<stem>.xmp` or `<file name>.xmp` in the photo's folder, however the case is spelled.
+    pub fn apply_sidecars(s: &mut crate::Session, downloaded: &[PathBuf]) -> Value {
+        use std::collections::HashSet;
+        let norm = |p: &Path| -> String {
+            let t = p.to_string_lossy().replace('\\', "/");
+            if cfg!(windows) { t.to_lowercase() } else { t }
+        };
+        let wanted: HashSet<(String, String)> =
+            downloaded.iter().filter_map(|p| Some((norm(p.parent()?), p.file_name()?.to_string_lossy().to_lowercase()))).collect();
+        let ids: Vec<u64> = s
+            .catalog
+            .photos()
+            .filter(|p| !p.deleted && p.copy_of.is_none())
+            .filter_map(|p| {
+                let lightcraft_catalog::Source::File { path } = &p.source else { return None };
+                let path = Path::new(path);
+                let dir = norm(path.parent()?);
+                let name = path.file_name()?.to_string_lossy().to_lowercase();
+                let stem = path.file_stem()?.to_string_lossy().to_lowercase();
+                (wanted.contains(&(dir.clone(), format!("{stem}.xmp"))) || wanted.contains(&(dir, format!("{name}.xmp")))).then_some(p.id.0)
+            })
+            .collect();
+        if ids.is_empty() {
+            return json!({"sidecars": downloaded.len(), "photos": 0, "read": 0});
+        }
+        s.skip_auto_write = true;
+        let params = json!({"ids": ids});
+        match s.execute_fn("nextcloud.apply", |s| crate::cmd::xmp::read(s, &params)) {
+            Ok(v) => {
+                json!({"sidecars": downloaded.len(), "photos": ids.len(), "read": v["read"].as_array().map_or(0, Vec::len), "failed": v["failed"].clone()})
+            }
+            Err(e) => json!({"sidecars": downloaded.len(), "photos": ids.len(), "read": 0, "error": e.to_string()}),
         }
     }
 
@@ -470,6 +549,7 @@ pub(crate) mod native {
             let saved = job.states.save(&id, &state);
             match outcome {
                 Ok(report) => {
+                    progress.add_downloaded(report.downloaded.iter().filter_map(|p| pair.local_for(p)));
                     let mut v = report_json(&id, &report);
                     if !warnings.is_empty() {
                         v["warnings"] = json!(warnings);
@@ -490,5 +570,60 @@ pub(crate) mod native {
             Some(e) => Err(e),
             None => Ok(json!({"pairs": results})),
         }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl crate::Session {
+    /// Read the sidecars the last Nextcloud job downloaded into the catalog, once. The sidecar wins
+    /// for what it states (as Read Metadata from File does), as one undo step, and **no sidecar is
+    /// written back**: with Automatically Write Changes into XMP on, rewriting what was just
+    /// downloaded would change its time, the next sync would send it up again, and two machines
+    /// would pass the same file back and forth for ever.
+    ///
+    /// The Nextcloud commands that report on a job call this, so a frontend that polls
+    /// `nextcloud.status` gets the downloads applied when the job is done. `None`: nothing to apply.
+    pub fn nextcloud_apply_pending(&mut self) -> Option<serde_json::Value> {
+        let paths = self.nextcloud.rt.take_downloaded();
+        if paths.is_empty() {
+            return None;
+        }
+        let result = native::apply_sidecars(self, &paths);
+        self.nextcloud.rt.record_apply(result.clone());
+        Some(result)
+    }
+
+    /// The automatic sync, for a frontend to call often (cheap when there is nothing to do):
+    /// applies finished downloads and, with `autoSync` on, starts a sync of every pair when the
+    /// catalog was last edited a few seconds ago or the interval has passed. `true`: something
+    /// happened. A sync that cannot start (no network, no password) is left to `nextcloud.result`.
+    pub fn nextcloud_tick(&mut self) -> bool {
+        let mut did = self.nextcloud_apply_pending().is_some();
+        let prefs = &self.nextcloud.prefs;
+        if !prefs.auto_sync || prefs.pairs.is_empty() || self.nextcloud.rt.running() {
+            return did;
+        }
+        let interval = std::time::Duration::from_secs(u64::from(match prefs.interval_secs {
+            0 => DEFAULT_INTERVAL_SECS,
+            n => n.max(MIN_INTERVAL_SECS),
+        }));
+        let now = web_time::Instant::now();
+        let commits = self.commits;
+        let rt = &mut self.nextcloud.rt;
+        if commits != rt.seen_commits {
+            rt.seen_commits = commits;
+            rt.dirty_since = Some(now);
+        }
+        let by_time = rt.last_start.is_none_or(|t| now.duration_since(t) >= interval);
+        let by_edit = rt.dirty_since.is_some_and(|t| now.duration_since(t) >= std::time::Duration::from_secs(EDIT_QUIET_SECS));
+        if by_time || by_edit {
+            rt.last_start = Some(now);
+            rt.dirty_since = None;
+            match crate::cmd::nextcloud::start_sync(self, None, false) {
+                Ok(_) => did = true,
+                Err(e) => log::warn!("nextcloud: automatic sync: {e}"),
+            }
+        }
+        did
     }
 }

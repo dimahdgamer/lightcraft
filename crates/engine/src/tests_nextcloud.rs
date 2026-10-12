@@ -9,16 +9,16 @@ use serde_json::{Value, json};
 
 use crate::{EngineError, Session};
 
-const T0: i64 = 1_700_000_000;
+pub(crate) const T0: i64 = 1_700_000_000;
 
-fn temp_dir(tag: &str) -> PathBuf {
+pub(crate) fn temp_dir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("lc-nc-engine-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
 }
 
-fn connect_params(fake: &Fake) -> Value {
+pub(crate) fn connect_params(fake: &Fake) -> Value {
     json!({"url": fake.url, "user": USER, "password": SECRET, "name": "Home", "wait": true})
 }
 
@@ -29,7 +29,7 @@ fn connected(fake: &Fake) -> Session {
     s
 }
 
-fn set_mtime(path: &std::path::Path, secs: i64) {
+pub(crate) fn set_mtime(path: &std::path::Path, secs: i64) {
     let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
     f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs.unsigned_abs())).unwrap();
 }
@@ -281,5 +281,5 @@ fn cancel_and_result_are_harmless_when_nothing_runs() {
     assert!(st["servers"].as_array().unwrap().is_empty() && st["job"].is_null());
     // the commands are listed, without a menu entry
     let ids: Vec<String> = s.commands().into_iter().filter(|c| c.id.starts_with("nextcloud.")).map(|c| c.id.to_string()).collect();
-    assert_eq!(ids.len(), 9, "{ids:?}");
+    assert_eq!(ids.len(), 11, "{ids:?}");
 }

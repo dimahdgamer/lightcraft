@@ -31,7 +31,7 @@ fn save(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"written": written, "merged": merged, "backups": backups, "failed": failed}))
 }
 
-fn read(s: &mut Session, p: &Value) -> Result<Value> {
+pub(crate) fn read(s: &mut Session, p: &Value) -> Result<Value> {
     let mut ops = Vec::new();
     let mut read = Vec::new();
     let mut failed = Vec::new();

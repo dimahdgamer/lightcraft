@@ -29,14 +29,14 @@ mod merge;
 pub mod metadata;
 pub mod missing;
 #[cfg(not(target_arch = "wasm32"))]
-mod nextcloud;
+pub(crate) mod nextcloud;
 mod organize;
 mod prefs;
 mod preset_files;
 pub mod previews;
 mod query;
 mod sync;
-mod xmp;
+pub(crate) mod xmp;
 
 use serde::Serialize;
 use serde_json::Value;

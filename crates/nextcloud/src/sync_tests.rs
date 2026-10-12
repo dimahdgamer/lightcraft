@@ -8,7 +8,7 @@ use crate::auth::Credentials;
 use crate::client::{Client, ClientError, Options};
 use crate::pair::{FolderPair, State, is_sidecar};
 use crate::plan::Conflict;
-use crate::sync::{Event, Report, execute, prepare, sync_pair};
+use crate::sync::{Event, Keep, Report, execute, prepare, resolve, sync_pair};
 use crate::testserver::*;
 
 const T0: i64 = 1_700_000_000;
@@ -320,4 +320,68 @@ fn progress_is_reported() {
     })
     .unwrap();
     assert_eq!(events, ["plan 1/0/0", "sent 50000", "finished /Photos/a.xmp"], "{events:?}");
+}
+
+/// Both sides edited `sub/b.xmp`.
+fn in_conflict() -> Setup {
+    let mut s = in_step();
+    s.local("sub/b.xmp", b"BB, my edit", T0 + 1000);
+    s.fake.put_at("Photos/sub/b.xmp", b"BB, their edit", T0 + 1500);
+    assert_eq!(s.run().conflicts.len(), 1);
+    s
+}
+
+fn decide(s: &mut Setup, path: &str, keep: Keep) -> Result<(), ClientError> {
+    resolve(&s.fake.client(), &s.pair, &mut s.state, &rp(path), keep, &no_cancel(), &mut |_| {})
+}
+
+#[test]
+fn keeping_the_local_file_replaces_the_servers_and_ends_the_conflict() {
+    let mut s = in_conflict();
+    decide(&mut s, "/Photos/sub/b.xmp", Keep::Local).unwrap();
+    assert_eq!(s.fake.file("Photos/sub/b.xmp").unwrap(), b"BB, my edit");
+    assert_eq!(s.fake.mtime("Photos/sub/b.xmp"), Some(T0 + 1000));
+    let r = s.run();
+    assert!(r.is_clean() && r.uploaded.is_empty() && r.downloaded.is_empty(), "{r:?}");
+    assert!(s.run().conflicts.is_empty());
+    assert!(!s.run().listed, "and the pair is back to the quick check");
+}
+
+#[test]
+fn keeping_the_servers_file_replaces_the_local_one_and_ends_the_conflict() {
+    let mut s = in_conflict();
+    decide(&mut s, "/Photos/sub/b.xmp", Keep::Server).unwrap();
+    assert_eq!(s.read("sub/b.xmp"), b"BB, their edit");
+    let r = s.run();
+    assert!(r.is_clean() && r.uploaded.is_empty() && r.downloaded.is_empty(), "{r:?}");
+    assert_eq!(s.fake.file("Photos/sub/b.xmp").unwrap(), b"BB, their edit", "the server's file was not touched");
+}
+
+#[test]
+fn a_deleted_side_can_be_restored_but_not_kept() {
+    // deleted on the server while changed here: keep local restores it, keep server has nothing to keep
+    let mut s = in_step();
+    s.local("c.xmp", b"C, changed here", T0 + 1000);
+    s.fake.remove("Photos/c.xmp");
+    assert_eq!(s.run().conflicts.len(), 1);
+    assert_eq!(decide(&mut s, "/Photos/c.xmp", Keep::Server), Err(ClientError::NotFound));
+    assert_eq!(s.read("c.xmp"), b"C, changed here", "nothing was lost by the refused choice");
+    decide(&mut s, "/Photos/c.xmp", Keep::Local).unwrap();
+    assert_eq!(s.fake.file("Photos/c.xmp").unwrap(), b"C, changed here");
+    // deleted here while changed on the server: keep server restores it, keep local has nothing
+    let mut s = in_step();
+    std::fs::remove_file(s.dir.path("a.xmp")).unwrap();
+    s.fake.put_at("Photos/a.xmp", b"A, changed there", T0 + 2000);
+    assert_eq!(s.run().conflicts.len(), 1);
+    assert_eq!(decide(&mut s, "/Photos/a.xmp", Keep::Local), Err(ClientError::NotFound));
+    decide(&mut s, "/Photos/a.xmp", Keep::Server).unwrap();
+    assert_eq!(s.read("a.xmp"), b"A, changed there");
+    assert!(s.run().is_clean());
+}
+
+#[test]
+fn a_path_outside_the_pair_or_a_folder_is_refused() {
+    let mut s = in_step();
+    assert!(matches!(decide(&mut s, "/Elsewhere/x.xmp", Keep::Local), Err(ClientError::BadServer(_))));
+    assert!(matches!(decide(&mut s, "/Photos/sub", Keep::Server), Err(ClientError::Io(_))));
 }

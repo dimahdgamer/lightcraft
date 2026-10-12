@@ -1,6 +1,6 @@
 # Nextcloud
 
-> **Last updated:** 2026-10-12 · **Status:** engine commands and tests; the desktop dialogs are not built yet.
+> **Last updated:** 2026-10-12 · **Status:** engine commands, applying downloads, automatic sync and conflict decisions, with tests; the desktop dialogs are not built yet.
 
 Keeps XMP sidecars (and nothing else) in step between a folder of a library and a folder on a Nextcloud
 server, so edits made on one machine arrive on the other. Originals are never uploaded or changed.
@@ -44,10 +44,38 @@ the password) for `query.journal`.
 | `nextcloud.pair.add` / `.remove` | folder pairs |
 | `nextcloud.list` | what is directly inside a server folder |
 | `nextcloud.sync` | bring pairs in step (`pair`, `preview`) |
+| `nextcloud.resolve` | decide a conflict: `keep: "local"` or `"server"` |
+| `nextcloud.settings` | `auto` (sync by itself) and `intervalSecs` |
 | `nextcloud.cancel`, `nextcloud.result` | stop / read the running or last job |
 
 Jobs that talk to a server run on their own thread, as a row (`kind: nextcloud`) in the activity stack.
 They return `{job}` at once; `wait: true` gives the outcome instead. One job runs at a time.
+
+## Downloads reach the catalog
+
+A downloaded sidecar is read into the photo it belongs to (`<stem>.xmp` or `<file name>.xmp` in the photo's
+folder) as one undo step, the sidecar winning for what it states, as Read Metadata from File does. This
+happens when a job is waited for (`wait: true`), or when `nextcloud.status` / `nextcloud.result` is asked after
+the job is done (`applied` in the reply), or from `Session::nextcloud_tick`. A sidecar of a photo that is not in
+the library is left for the import, which reads sidecars as it always does.
+
+**The sidecar is not written back after being read**, even with *Automatically Write Changes into XMP* on:
+rewriting it would change its time, the next sync would send it up again, and a second machine would do the
+same with it, for ever.
+
+## Syncing by itself
+
+`nextcloud.settings {auto: true}` makes `Session::nextcloud_tick` (which a frontend calls often; it is cheap)
+start a sync of all pairs ten seconds after the last edit, and every `intervalSecs` (300 by default, at
+least 30). Without a pair or with a job running it does nothing.
+
+## Deciding a conflict
+
+A conflict is reported by `nextcloud.sync` and stays one, on every run, until it is decided with
+`nextcloud.resolve {pair, path, keep}`: `local` replaces the server's file with this machine's (or restores it
+on the server if it was deleted there), `server` replaces this machine's file and reads it into the catalog
+(or restores it here). A side that no longer has the file cannot be kept. Keeping *both* (the other side's
+edit as a named version of the photo) is not built yet.
 
 ## What is saved, and where
 
@@ -83,6 +111,6 @@ no conflict, failure or reported deletion.
 
 ## Not yet
 
-Applying downloaded sidecars to the catalog, upload after an edit without a manual sync, the dialogs of the
-desktop app, remembering the password in the system's credential store, and the travel pack (smart previews
-and a manifest, to edit without the originals).
+The dialogs of the desktop app (and a frontend that calls `nextcloud_tick`), remembering the password in the
+system's credential store, keeping both sides of a conflict, and the travel pack (smart previews and a
+manifest, to edit without the originals).

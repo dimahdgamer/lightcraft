@@ -8,12 +8,14 @@
 
 use std::path::{Path, PathBuf};
 
+use lightcraft_nextcloud::pair::FolderPair;
+use lightcraft_nextcloud::sync::{Keep, resolve};
 use lightcraft_nextcloud::{Client, Credentials, Options, RemotePath};
 use serde_json::{Value, json};
 
 use super::{CommandSpec, always, bad, bool_or, cmd, str_param};
 use crate::nextcloud::native::{PairJob, run_pairs};
-use crate::nextcloud::{Pair, Server, valid_id, valid_name};
+use crate::nextcloud::{DEFAULT_INTERVAL_SECS, MIN_INTERVAL_SECS, Pair, Server, valid_id, valid_name};
 use crate::{EngineError, Result, Session};
 
 /// Most entries a folder listing gives back.
@@ -29,7 +31,17 @@ fn library_dir(s: &Session) -> Option<PathBuf> {
 
 /// Give the outcome now (`wait`) or say that the job started.
 fn finish(s: &mut Session, job: u64, p: &Value) -> Result<Value> {
-    if bool_or(p, "wait", false) { s.nextcloud.rt.wait().map_err(other) } else { Ok(json!({"job": job, "running": true})) }
+    if !bool_or(p, "wait", false) {
+        return Ok(json!({"job": job, "running": true}));
+    }
+    let mut result = s.nextcloud.rt.wait().map_err(other)?;
+    // what the job downloaded is read into the catalog now, as the job is done
+    if let Some(applied) = s.nextcloud_apply_pending()
+        && result.is_object()
+    {
+        result["applied"] = applied;
+    }
+    Ok(result)
 }
 
 /// `https://cloud.example.org/` → `cloud.example.org`.
@@ -44,7 +56,12 @@ fn save(s: &mut Session) {
     }
 }
 
+fn effective_interval(secs: u32) -> u32 {
+    if secs == 0 { DEFAULT_INTERVAL_SECS } else { secs.max(MIN_INTERVAL_SECS) }
+}
+
 fn status(s: &mut Session, _: &Value) -> Result<Value> {
+    s.nextcloud_apply_pending();
     let n = &s.nextcloud;
     let servers: Vec<Value> = n
         .prefs
@@ -53,7 +70,40 @@ fn status(s: &mut Session, _: &Value) -> Result<Value> {
         .map(|sv| json!({"name": sv.name, "url": sv.url, "user": sv.user, "hasPassword": n.rt.has_secret(sv), "plainHttp": sv.url.starts_with("http://")}))
         .collect();
     let pairs: Vec<Value> = n.prefs.pairs.iter().map(|p| json!({"id": p.id, "server": p.server, "remote": p.remote, "local": p.local})).collect();
-    Ok(json!({"servers": servers, "pairs": pairs, "rememberPasswords": n.rt.persistent_secrets(), "job": n.rt.status()}))
+    Ok(json!({
+        "servers": servers,
+        "pairs": pairs,
+        "rememberPasswords": n.rt.persistent_secrets(),
+        "autoSync": n.prefs.auto_sync,
+        "intervalSecs": effective_interval(n.prefs.interval_secs),
+        "job": n.rt.status(),
+    }))
+}
+
+fn result(s: &mut Session, _: &Value) -> Result<Value> {
+    s.nextcloud_apply_pending();
+    Ok(s.nextcloud.rt.status())
+}
+
+fn settings(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "nextcloud.settings";
+    let prefs = &mut s.nextcloud.prefs;
+    if let Some(on) = p.get("auto").and_then(Value::as_bool) {
+        prefs.auto_sync = on;
+    }
+    if let Some(v) = p.get("intervalSecs") {
+        let secs = v
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| *n == 0 || *n >= MIN_INTERVAL_SECS)
+            .ok_or_else(|| bad(C, format!("`intervalSecs` must be 0 (the default) or at least {MIN_INTERVAL_SECS}")))?;
+        prefs.interval_secs = secs;
+    }
+    let (auto, secs) = (prefs.auto_sync, effective_interval(prefs.interval_secs));
+    if p.as_object().is_some_and(|o| !o.is_empty()) {
+        save(s);
+    }
+    Ok(json!({"auto": auto, "intervalSecs": secs}))
 }
 
 fn connect(s: &mut Session, p: &Value) -> Result<Value> {
@@ -196,9 +246,9 @@ fn list(s: &mut Session, p: &Value) -> Result<Value> {
     finish(s, job, p)
 }
 
-fn sync(s: &mut Session, p: &Value) -> Result<Value> {
+/// Start a sync of one pair (or all) as a job. Used by `nextcloud.sync` and the automatic sync.
+pub(crate) fn start_sync(s: &mut Session, which: Option<&str>, preview: bool) -> Result<u64> {
     const C: &str = "nextcloud.sync";
-    let which = str_param(p, "pair").filter(|v| *v != "all");
     let pairs: Vec<Pair> = match which {
         Some(id) => vec![s.nextcloud.prefs.pair(id).cloned().ok_or_else(|| bad(C, format!("no folder pair `{id}`")))?],
         None => s.nextcloud.prefs.pairs.clone(),
@@ -213,9 +263,51 @@ fn sync(s: &mut Session, p: &Value) -> Result<Value> {
         let client = s.nextcloud.rt.client(&server).map_err(other)?;
         jobs.push(PairJob { pair, client, states: states.clone() });
     }
-    let preview = bool_or(p, "preview", false);
     let label = if preview { "Checking Nextcloud" } else { "Syncing with Nextcloud" };
-    let job = s.nextcloud.rt.start(&s.activity, "sync", label, move |cancel, progress| run_pairs(jobs, preview, cancel, progress)).map_err(other)?;
+    s.nextcloud.rt.start(&s.activity, "sync", label, move |cancel, progress| run_pairs(jobs, preview, cancel, progress)).map_err(other)
+}
+
+fn sync(s: &mut Session, p: &Value) -> Result<Value> {
+    let which = str_param(p, "pair").filter(|v| *v != "all");
+    let job = start_sync(s, which, bool_or(p, "preview", false))?;
+    finish(s, job, p)
+}
+
+fn resolve_conflict(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "nextcloud.resolve";
+    let id = str_param(p, "pair").ok_or_else(|| bad(C, "missing `pair`"))?;
+    let pair = s.nextcloud.prefs.pair(id).cloned().ok_or_else(|| bad(C, format!("no folder pair `{id}`")))?;
+    let path = RemotePath::parse(str_param(p, "path").ok_or_else(|| bad(C, "missing `path` (a conflict from nextcloud.sync)"))?)
+        .map_err(|e| bad(C, e.to_string()))?;
+    let base = RemotePath::parse(&pair.remote).map_err(|e| bad(C, e.to_string()))?;
+    if path == base || !path.starts_with(&base) {
+        return Err(bad(C, format!("{path} is not a file inside {}", pair.remote)));
+    }
+    let keep = match str_param(p, "keep") {
+        Some("local") => Keep::Local,
+        Some("server") => Keep::Server,
+        _ => return Err(bad(C, "`keep` must be \"local\" (this machine's file replaces the server's) or \"server\"")),
+    };
+    let server = s.nextcloud.prefs.server(&pair.server).cloned().ok_or_else(|| bad(C, format!("no server `{}`", pair.server)))?;
+    let client = s.nextcloud.rt.client(&server).map_err(other)?;
+    let states = s.nextcloud.rt.states(library_dir(s).as_deref());
+    let job = s
+        .nextcloud
+        .rt
+        .start(&s.activity, "resolve", "Resolving a Nextcloud conflict", move |cancel, progress| {
+            progress.detail(path.file_name().unwrap_or(""));
+            let folder = FolderPair::new(base, PathBuf::from(&pair.local));
+            let (mut state, _) = states.load(&pair.id);
+            let outcome = resolve(&client, &folder, &mut state, &path, keep, cancel, &mut |_| {});
+            // the record is saved either way: it is always up to date with what was done
+            states.save(&pair.id, &state)?;
+            outcome.map_err(|e| e.to_string())?;
+            if keep == Keep::Server {
+                progress.add_downloaded(folder.local_for(&path));
+            }
+            Ok(json!({"pair": pair.id, "path": path.to_string(), "kept": if keep == Keep::Local { "local" } else { "server" }}))
+        })
+        .map_err(other)?;
     finish(s, job, p)
 }
 
@@ -285,6 +377,24 @@ pub fn specs() -> Vec<CommandSpec> {
             sync
         ),
         cmd!(
+            query "nextcloud.resolve",
+            "Resolve a Nextcloud Conflict",
+            [],
+            None,
+            "{pair, path, keep: \"local\"|\"server\", wait?: false} — decide a conflict that nextcloud.sync reported: `local` replaces the server's file with this machine's (or restores it there), `server` replaces this machine's (or restores it) and reads it into the catalog; the file is then in step → {job} or, with `wait`, {pair, path, kept}. Nothing is decided without this call",
+            always,
+            resolve_conflict
+        ),
+        cmd!(
+            query "nextcloud.settings",
+            "Nextcloud Settings",
+            [],
+            None,
+            "{auto?: bool, intervalSecs?: 0|>=30} → {auto, intervalSecs} — whether the app syncs by itself (a few seconds after an edit, and every `intervalSecs`, 300 by default)",
+            always,
+            settings
+        ),
+        cmd!(
             query "nextcloud.cancel",
             "Cancel Nextcloud Job",
             [],
@@ -298,9 +408,9 @@ pub fn specs() -> Vec<CommandSpec> {
             "Nextcloud Job Result",
             [],
             None,
-            "{} → null or {id, kind, running, done, total, detail, ok?, result?, error?} — the last or running job",
+            "{} → null or {id, kind, running, done, total, detail, applied?, ok?, result?, error?} — the last or running job; sidecars it downloaded are read into the catalog when this is asked after it is done (`applied`)",
             always,
-            |s, _| Ok(s.nextcloud.rt.status())
+            result
         ),
     ]
 }
