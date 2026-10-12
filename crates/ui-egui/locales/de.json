@@ -2134,5 +2134,13 @@
   "Keep the server's": "Die Version des Servers behalten",
   "Some files were deleted on one side. Nothing is deleted for you.": "Einige Dateien wurden auf einer Seite gelöscht. Es wird nichts für dich gelöscht.",
   "Sync now": "Jetzt abgleichen",
-  "Nextcloud…": "Nextcloud…"
+  "Nextcloud…": "Nextcloud…",
+  "Travel packs": "Reisepakete",
+  "Take photos along without their originals: their smart previews and edits go on the Nextcloud, and you edit them on another computer.": "Nimm Fotos ohne ihre Originale mit: Ihre Smart Previews und Bearbeitungen kommen auf die Nextcloud, und du bearbeitest sie auf einem anderen Computer.",
+  "Pack name": "Paketname",
+  "Trip to Italy": "Reise nach Italien",
+  "Publish selected photos": "Ausgewählte Fotos veröffentlichen",
+  "Look for packs": "Pakete suchen",
+  "No travel packs on this server.": "Keine Reisepakete auf diesem Server.",
+  "Open": "Öffnen"
 }

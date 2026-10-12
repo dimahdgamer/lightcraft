@@ -63,6 +63,8 @@ pub mod segment;
 pub mod sidecar;
 pub mod smart;
 pub mod sync;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod travel;
 mod view;
 pub mod walk;
 
@@ -1022,6 +1024,9 @@ mod tests_nextcloud;
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod tests_nextcloud_machines;
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod tests_nextcloud_pack;
 #[cfg(test)]
 mod tests_organize;
 #[cfg(test)]

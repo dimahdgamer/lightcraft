@@ -281,5 +281,5 @@ fn cancel_and_result_are_harmless_when_nothing_runs() {
     assert!(st["servers"].as_array().unwrap().is_empty() && st["job"].is_null());
     // the commands are listed, without a menu entry
     let ids: Vec<String> = s.commands().into_iter().filter(|c| c.id.starts_with("nextcloud.")).map(|c| c.id.to_string()).collect();
-    assert_eq!(ids.len(), 11, "{ids:?}");
+    assert_eq!(ids.len(), 14, "{ids:?}");
 }

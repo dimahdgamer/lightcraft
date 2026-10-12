@@ -14,9 +14,11 @@ use lightcraft_nextcloud::{Client, Credentials, Options, RemotePath};
 use serde_json::{Value, json};
 
 use super::{CommandSpec, always, bad, bool_or, cmd, str_param};
-use crate::nextcloud::native::{PairJob, run_pairs};
+use crate::nextcloud::native::{OpenJob, PairJob, PublishJob, run_open, run_pack_list, run_pairs, run_publish};
 use crate::nextcloud::{DEFAULT_INTERVAL_SECS, MIN_INTERVAL_SECS, Pair, Server, valid_id, valid_name};
+use crate::travel::{self, Manifest};
 use crate::{EngineError, Result, Session};
+use lightcraft_catalog::PhotoId;
 
 /// Most entries a folder listing gives back.
 const MAX_LISTED: usize = 5000;
@@ -175,22 +177,19 @@ fn disconnect(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"removedPairs": removed}))
 }
 
-fn pair_add(s: &mut Session, p: &Value) -> Result<Value> {
-    const C: &str = "nextcloud.pair.add";
-    let server = str_param(p, "server").ok_or_else(|| bad(C, "missing `server`"))?;
+/// Add a folder pair (or, with `existing_ok`, take the one that is there already).
+fn make_pair(s: &mut Session, c: &str, server: &str, remote: &RemotePath, local: &str, existing_ok: bool) -> Result<Pair> {
     if s.nextcloud.prefs.server(server).is_none() {
-        return Err(bad(C, format!("no server `{server}`: connect first")));
+        return Err(bad(c, format!("no server `{server}`: connect first")));
     }
-    let remote =
-        RemotePath::parse(str_param(p, "remote").ok_or_else(|| bad(C, "missing `remote` (such as /Photos)"))?).map_err(|e| bad(C, e.to_string()))?;
-    let local = str_param(p, "local").map(str::trim).filter(|v| !v.is_empty()).ok_or_else(|| bad(C, "missing `local` folder"))?;
-    if !Path::new(local).is_absolute() {
-        return Err(bad(C, "`local` must be an absolute folder path"));
+    let local = local.trim();
+    if local.is_empty() || !Path::new(local).is_absolute() {
+        return Err(bad(c, "`local` must be an absolute folder path"));
     }
     let prefs = &mut s.nextcloud.prefs;
-    let (remote, local) = (remote.to_string(), local.to_string());
-    if prefs.pairs.iter().any(|x| x.server == server && x.remote == remote && x.local == local) {
-        return Err(bad(C, "that folder pair exists already"));
+    let remote = remote.to_string();
+    if let Some(found) = prefs.pairs.iter().find(|x| x.server == server && x.remote == remote && x.local == local) {
+        return if existing_ok { Ok(found.clone()) } else { Err(bad(c, "that folder pair exists already")) };
     }
     let mut id;
     loop {
@@ -200,9 +199,20 @@ fn pair_add(s: &mut Session, p: &Value) -> Result<Value> {
             break;
         }
     }
-    prefs.pairs.push(Pair { id: id.clone(), server: server.to_string(), remote: remote.clone(), local: local.clone() });
+    let pair = Pair { id, server: server.to_string(), remote, local: local.to_string() };
+    prefs.pairs.push(pair.clone());
     save(s);
-    Ok(json!({"id": id, "remote": remote, "local": local}))
+    Ok(pair)
+}
+
+fn pair_add(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "nextcloud.pair.add";
+    let server = str_param(p, "server").ok_or_else(|| bad(C, "missing `server`"))?;
+    let remote =
+        RemotePath::parse(str_param(p, "remote").ok_or_else(|| bad(C, "missing `remote` (such as /Photos)"))?).map_err(|e| bad(C, e.to_string()))?;
+    let local = str_param(p, "local").ok_or_else(|| bad(C, "missing `local` folder"))?;
+    let pair = make_pair(s, C, server, &remote, local, false)?;
+    Ok(json!({"id": pair.id, "remote": pair.remote, "local": pair.local}))
 }
 
 fn pair_remove(s: &mut Session, p: &Value) -> Result<Value> {
@@ -244,6 +254,144 @@ fn list(s: &mut Session, p: &Value) -> Result<Value> {
         })
         .map_err(other)?;
     finish(s, job, p)
+}
+
+/// The server a command is about: `server`, or the only one the library knows.
+fn server_of(s: &Session, p: &Value, c: &str) -> Result<Server> {
+    match str_param(p, "server") {
+        Some(name) => s.nextcloud.prefs.server(name).cloned().ok_or_else(|| bad(c, format!("no server `{name}`"))),
+        None => match s.nextcloud.prefs.servers.as_slice() {
+            [only] => Ok(only.clone()),
+            [] => Err(bad(c, "no server: connect first")),
+            _ => Err(bad(c, "more than one server: say which with `server`")),
+        },
+    }
+}
+
+/// The folder on the server that holds travel packs (`base`, `/LightCraft` by default).
+fn pack_base(p: &Value, c: &str) -> Result<RemotePath> {
+    RemotePath::parse(str_param(p, "base").unwrap_or("/LightCraft")).map_err(|e| bad(c, e.to_string()))
+}
+
+fn pack_name(p: &Value, c: &str) -> Result<String> {
+    let name = str_param(p, "name").map(str::trim).filter(|n| !n.is_empty()).ok_or_else(|| bad(c, "missing `name`"))?;
+    if !travel::valid_pack_name(name) {
+        return Err(bad(c, "`name` must be one usable folder name (none of / \\ : * ? \" < > |, no trailing dot or space)"));
+    }
+    Ok(name.to_string())
+}
+
+fn pack_publish(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "nextcloud.pack.publish";
+    let server = server_of(s, p, C)?;
+    let name = pack_name(p, C)?;
+    let base = pack_base(p, C)?;
+    let lib = library_dir(s).ok_or_else(|| bad(C, "a travel pack needs a library on disk"))?;
+    let ids: Vec<PhotoId> = if let Some(list) = p.get("ids").and_then(Value::as_array) {
+        list.iter().filter_map(Value::as_u64).map(PhotoId).collect()
+    } else if bool_or(p, "all", false) {
+        s.catalog.photos().filter(|ph| ph.in_library()).map(|ph| ph.id).collect()
+    } else {
+        s.targets(p)
+    };
+    if ids.is_empty() {
+        return Err(bad(C, "no photos: select some, or pass `ids` or `all`"));
+    }
+    let root = match str_param(p, "root") {
+        Some(r) => PathBuf::from(r),
+        None => {
+            let paths: Vec<PathBuf> = ids
+                .iter()
+                .filter_map(|id| s.catalog.photo(*id))
+                .filter_map(|ph| if let lightcraft_catalog::Source::File { path } = &ph.source { Some(PathBuf::from(path)) } else { None })
+                .collect();
+            travel::common_root(&paths).ok_or_else(|| bad(C, "the photos share no folder: give `root`, the folder the pack is made from"))?
+        }
+    };
+    if !root.is_absolute() {
+        return Err(bad(C, "`root` must be an absolute folder path"));
+    }
+    let collected = travel::collect(s, &ids, &root).map_err(|e| bad(C, e))?;
+    if collected.photos.is_empty() {
+        let why: Vec<String> = collected.skipped.iter().take(5).map(|(n, w)| format!("{n}: {w}")).collect();
+        return Err(bad(C, format!("nothing to publish ({})", why.join("; "))));
+    }
+    // the smart previews are what a laptop edits from: make the missing ones first, in the background
+    if !collected.missing_previews.is_empty() {
+        let missing: Vec<u64> = collected.missing_previews.iter().map(|id| id.0).collect();
+        s.execute("library.smartPreviews", &json!({"ids": missing, "background": true}))?;
+        return Ok(json!({"needsSmartPreviews": missing.len(), "building": true}));
+    }
+    // the edits go in the sidecars: write them for the photos of the pack
+    let owners = crate::sidecar::StemOwners::of(&s.catalog);
+    let sidecar_failures: Vec<Value> =
+        collected.ids.iter().filter_map(|id| s.save_sidecar_with(*id, &owners).err().map(|e| json!({"id": id.0, "error": e.to_string()}))).collect();
+    let pack = base.join(&name).map_err(|e| bad(C, e.to_string()))?;
+    let remote_photos = pack.join("photos").map_err(|e| bad(C, e.to_string()))?;
+    let pair = make_pair(s, C, &server.name, &remote_photos, &root.to_string_lossy(), true)?;
+    let client = s.nextcloud.rt.client(&server).map_err(other)?;
+    let pair_client = s.nextcloud.rt.client(&server).map_err(other)?;
+    let states = s.nextcloud.rt.states(Some(&lib));
+    let record_dir = lib.join("Nextcloud");
+    std::fs::create_dir_all(&record_dir).map_err(|e| other(format!("can't create {}: {e}", record_dir.display())))?;
+    let manifest = Manifest { version: travel::VERSION, name: name.clone(), created: (s.clock)(), photos: collected.photos.clone() };
+    let skipped: Vec<Value> = collected.skipped.iter().take(50).map(|(n, w)| json!({"name": n, "why": w})).collect();
+    let job = PublishJob {
+        client,
+        name,
+        pack,
+        manifest: manifest.to_json(),
+        photos: collected.photos.len(),
+        previews: collected.previews,
+        record: record_dir.join(format!("pack-{}.json", manifest.name)),
+        pair: PairJob { pair, client: pair_client, states },
+        extra: json!({"skipped": skipped, "skippedCount": collected.skipped.len(), "sidecarFailures": sidecar_failures, "root": root.to_string_lossy()}),
+    };
+    let started = s
+        .nextcloud
+        .rt
+        .start(&s.activity, "pack", "Publishing a travel pack", move |cancel, progress| run_publish(job, cancel, progress))
+        .map_err(other)?;
+    finish(s, started, p)
+}
+
+fn pack_open(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "nextcloud.pack.open";
+    let server = server_of(s, p, C)?;
+    let name = pack_name(p, C)?;
+    let base = pack_base(p, C)?;
+    let lib = library_dir(s).ok_or_else(|| bad(C, "opening a travel pack needs a library on disk"))?;
+    let smart_dir = s.media.smart_dir.clone().ok_or_else(|| bad(C, "opening a travel pack needs a library on disk (it keeps the smart previews)"))?;
+    let local_root = match str_param(p, "local") {
+        Some(l) => PathBuf::from(l),
+        None => lib.join("Travel Packs").join(&name),
+    };
+    if !local_root.is_absolute() {
+        return Err(bad(C, "`local` must be an absolute folder path"));
+    }
+    let pack = base.join(&name).map_err(|e| bad(C, e.to_string()))?;
+    let remote_photos = pack.join("photos").map_err(|e| bad(C, e.to_string()))?;
+    let pair = make_pair(s, C, &server.name, &remote_photos, &local_root.join("photos").to_string_lossy(), true)?;
+    let client = s.nextcloud.rt.client(&server).map_err(other)?;
+    let pair_client = s.nextcloud.rt.client(&server).map_err(other)?;
+    let states = s.nextcloud.rt.states(Some(&lib));
+    let job = OpenJob { client, name, pack, local_root, smart_dir, pair: PairJob { pair, client: pair_client, states } };
+    let started =
+        s.nextcloud.rt.start(&s.activity, "pack", "Opening a travel pack", move |cancel, progress| run_open(job, cancel, progress)).map_err(other)?;
+    finish(s, started, p)
+}
+
+fn pack_list(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "nextcloud.pack.list";
+    let server = server_of(s, p, C)?;
+    let base = pack_base(p, C)?;
+    let client = s.nextcloud.rt.client(&server).map_err(other)?;
+    let started = s
+        .nextcloud
+        .rt
+        .start(&s.activity, "packList", "Looking for travel packs", move |cancel, progress| run_pack_list(client, base, cancel, progress))
+        .map_err(other)?;
+    finish(s, started, p)
 }
 
 /// Start a sync of one pair (or all) as a job. Used by `nextcloud.sync` and the automatic sync.
@@ -378,6 +526,33 @@ pub fn specs() -> Vec<CommandSpec> {
             "{pair?: id|\"all\", preview?: false, wait?: false} — bring folder pairs in step (sidecars both ways; a conflict, or a file deleted on one side, is reported and moves nothing), in the background → {job} or, with `wait`, {pairs: [{pair, uploaded, downloaded, conflicts, remoteDeleted, localDeleted, failed, clean, …}]}; `preview` only plans",
             always,
             sync
+        ),
+        cmd!(
+            query "nextcloud.pack.publish",
+            "Publish a Travel Pack",
+            [],
+            None,
+            "{name, ids?, all?: bool, root?, server?, base?: \"/LightCraft\", wait?: false} — put photos on the Nextcloud so they can be edited on a laptop that has no originals: the smart previews, a manifest and the sidecars (written for the pack), in `<base>/<name>/`; the photo folder becomes a folder pair on its photos/. Photos without a smart preview are made first in the background → {needsSmartPreviews, building}; run it again when they are done. `root` is the folder the pack is made from (the deepest folder the photos share by default). → {job} or, with `wait`, {pack, photos, previewsSent, previewsFailed, sync, skipped, sidecarFailures}",
+            always,
+            pack_publish
+        ),
+        cmd!(
+            query "nextcloud.pack.list",
+            "List Travel Packs",
+            [],
+            None,
+            "{server?, base?: \"/LightCraft\", wait?: false} — the packs on the server → {job} or, with `wait`, {base, packs: [{name, manifestSize, modified}]}",
+            always,
+            pack_list
+        ),
+        cmd!(
+            query "nextcloud.pack.open",
+            "Open a Travel Pack",
+            [],
+            None,
+            "{name, server?, base?: \"/LightCraft\", local?, wait?: false} — fetch a pack's smart previews and sidecars and make offline records of its photos (no original here; they are edited from their smart previews, and what is edited goes back as sidecars) → {job} or, with `wait`, {pack, photos, skippedEntries, previewsFetched, previewsHad, previewsFailed, sync, applied.pack: {added, existing}}. `local` is where the pack lives on this machine (`Travel Packs/<name>` in the library by default)",
+            always,
+            pack_open
         ),
         cmd!(
             query "nextcloud.resolve",

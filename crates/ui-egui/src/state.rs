@@ -1015,6 +1015,9 @@ pub enum Dialog {
         remember: bool,
         remote: String,
         local: String,
+        /// The name of the travel pack being published.
+        #[serde(default)]
+        pack: String,
         /// The engine's `nextcloud.status`, refreshed every frame while the dialog is open.
         #[serde(skip)]
         status: serde_json::Value,

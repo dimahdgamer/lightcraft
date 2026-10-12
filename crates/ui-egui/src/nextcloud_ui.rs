@@ -36,6 +36,7 @@ pub fn open(app: &mut LightcraftApp) -> Result<Value, String> {
         remember: true,
         remote: "/Photos".into(),
         local: String::new(),
+        pack: String::new(),
         status,
     });
     Ok(Value::Null)
@@ -78,6 +79,9 @@ enum Act {
     ChooseFolder,
     Auto(bool),
     Resolve { pair: String, path: String, keep: &'static str },
+    Publish,
+    PackList,
+    PackOpen(String),
 }
 
 fn count(v: &Value, key: &str) -> u64 {
@@ -86,7 +90,7 @@ fn count(v: &Value, key: &str) -> u64 {
 
 /// The dialog's body.
 pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, dlg: &mut Dialog) {
-    let Dialog::Nextcloud { url, user, password, remember, remote, local, status } = dlg else { return };
+    let Dialog::Nextcloud { url, user, password, remember, remote, local, pack, status } = dlg else { return };
     let t = Tokens::get(ui.ctx());
     ui.set_width(520.0);
     let dim = |ui: &mut egui::Ui, s: &str| ui.label(egui::RichText::new(s).color(t.text_dim));
@@ -206,6 +210,52 @@ pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, dlg: &mut Dialog) {
         }
     }
 
+    // ---- travel packs
+    if !servers.is_empty() {
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(crate::i18n::tr("Travel packs")).font(t.semibold(12.5)).color(t.text));
+        dim(
+            ui,
+            crate::i18n::tr(
+                "Take photos along without their originals: their smart previews and edits go on the Nextcloud, and you edit them on another computer.",
+            ),
+        );
+        ui.horizontal(|ui| {
+            ui.add_sized([120.0, 20.0], egui::Label::new(egui::RichText::new(crate::i18n::tr("Pack name")).color(t.text_label)));
+            TextField::singleline("ncPackName", pack).hint(crate::i18n::tr("Trip to Italy")).width(200.0).show(ui);
+            let ready = !pack.trim().is_empty() && !running;
+            let r = ui.add_enabled(ready, egui::Button::new(crate::i18n::tr("Publish selected photos")));
+            crate::widgets::register(ui.ctx(), "button:ncPublish", r.rect);
+            if r.clicked() {
+                act = Some(Act::Publish);
+            }
+        });
+        ui.horizontal(|ui| {
+            let r = ui.add_enabled(!running, egui::Button::new(crate::i18n::tr("Look for packs")));
+            crate::widgets::register(ui.ctx(), "button:ncPackList", r.rect);
+            if r.clicked() {
+                act = Some(Act::PackList);
+            }
+        });
+        if !running && job["kind"] == "packList" && job["ok"] == true {
+            let packs = job["result"]["packs"].as_array().cloned().unwrap_or_default();
+            if packs.is_empty() {
+                dim(ui, crate::i18n::tr("No travel packs on this server."));
+            }
+            for (i, pk) in packs.iter().enumerate() {
+                let name = pk["name"].as_str().unwrap_or("").to_string();
+                ui.horizontal(|ui| {
+                    ui.label(&name);
+                    let r = ui.add(egui::Button::new(crate::i18n::tr("Open")));
+                    crate::widgets::register(ui.ctx(), format!("button:ncPackOpen:{i}"), r.rect);
+                    if r.clicked() {
+                        act = Some(Act::PackOpen(name.clone()));
+                    }
+                });
+            }
+        }
+    }
+
     // ---- the job
     ui.add_space(6.0);
     if running {
@@ -234,6 +284,22 @@ pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, dlg: &mut Dialog) {
                 match job["kind"].as_str().unwrap_or("") {
                     "connect" => {
                         ui.label(crate::i18n::tr_format!("Signed in as {user}.", user = result["user"].as_str().unwrap_or("")));
+                    }
+                    "pack" if result["previewsSent"].is_u64() => {
+                        let (photos, sent) = (result["photos"].as_u64().unwrap_or(0), result["previewsSent"].as_u64().unwrap_or(0));
+                        ui.label(crate::i18n::tr_format!("Published {photos} photos, {sent} previews sent.", photos = photos, sent = sent));
+                        let failed = result["previewsFailed"].as_u64().unwrap_or(0);
+                        if failed > 0 {
+                            ui.label(egui::RichText::new(crate::i18n::tr_format!("{n} previews could not be sent.", n = failed)).color(t.caution));
+                        }
+                    }
+                    "pack" => {
+                        let (photos, added) = (result["photos"].as_u64().unwrap_or(0), job["applied"]["pack"]["added"].as_u64().unwrap_or(0));
+                        ui.label(crate::i18n::tr_format!("Opened {photos} photos, {added} of them new here.", photos = photos, added = added));
+                        let failed = result["previewsFailed"].as_u64().unwrap_or(0);
+                        if failed > 0 {
+                            ui.label(egui::RichText::new(crate::i18n::tr_format!("{n} previews could not be fetched.", n = failed)).color(t.caution));
+                        }
                     }
                     "sync" => {
                         let pairs_done = result["pairs"].as_array().cloned().unwrap_or_default();
@@ -321,6 +387,18 @@ pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, dlg: &mut Dialog) {
         }
         Act::Auto(on) => app.session.execute("nextcloud.settings", &json!({"auto": on})),
         Act::Resolve { pair, path, keep } => app.session.execute("nextcloud.resolve", &json!({"pair": pair, "path": path, "keep": keep})),
+        Act::Publish => {
+            let r = app.session.execute("nextcloud.pack.publish", &json!({"name": pack.trim()}));
+            // the previews are made first, in the background: say so, and to press the button again
+            if let Ok(v) = &r
+                && let Some(n) = v["needsSmartPreviews"].as_u64()
+            {
+                app.toast(&ctx, crate::i18n::tr_format!("Making smart previews first ({n}). Press Publish again when they are done.", n = n));
+            }
+            r
+        }
+        Act::PackList => app.session.execute("nextcloud.pack.list", &json!({})),
+        Act::PackOpen(name) => app.session.execute("nextcloud.pack.open", &json!({"name": name})),
     };
     if let Err(e) = result {
         app.toast(&ctx, e.to_string());

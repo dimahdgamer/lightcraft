@@ -1,9 +1,10 @@
 # Nextcloud
 
-> **Last updated:** 2026-10-12 · **Status:** engine commands, applying downloads, automatic sync, conflict decisions, the dialog in the desktop app and (Windows) remembering the app password, with tests.
+> **Last updated:** 2026-10-12 · **Status:** engine commands, applying downloads, automatic sync, conflict decisions, the dialog in the desktop app, (Windows) remembering the app password, and travel packs, with tests.
 
-Keeps XMP sidecars (and nothing else) in step between a folder of a library and a folder on a Nextcloud
-server, so edits made on one machine arrive on the other. Originals are never uploaded or changed.
+Keeps XMP sidecars in step between a folder of a library and a folder on a Nextcloud server, so edits made on
+one machine arrive on the other. Originals are never uploaded or changed. A **travel pack** adds the smart
+previews of some photos, so a laptop without the originals can edit them too.
 
 ## Idea
 
@@ -24,8 +25,8 @@ logic is `lightcraft_nextcloud::plan`, pure functions with property tests.
 ## In the app
 
 **File ▸ Nextcloud…** opens one dialog: the connection (address, user name, app password), the folder pairs
-(*Server folder* and *On this computer*, with *Choose…*), *Sync by itself*, *Sync now*, and what the last sync
-did. A conflict is listed with **Keep this computer's** and **Keep the server's**. Buttons wait while a job
+(*Server folder* and *On this computer*, with *Choose…*), *Sync by itself*, *Sync now*, the travel packs
+(below), and what the last job did. A conflict is listed with **Keep this computer's** and **Keep the server's**. Buttons wait while a job
 runs; the same job shows as a row in the activity stack. Everything the dialog does is a `nextcloud.*`
 command. The app calls `Session::nextcloud_tick` every frame (see below), so the automatic sync works with
 the dialog closed. The password field shows dots, and the password is cleared from the dialog as soon as
@@ -60,6 +61,7 @@ the password) for `query.journal`.
 | `nextcloud.list` | what is directly inside a server folder |
 | `nextcloud.sync` | bring pairs in step (`pair`, `preview`) |
 | `nextcloud.resolve` | decide a conflict: `keep: "local"` or `"server"` |
+| `nextcloud.pack.publish` / `.list` / `.open` | travel packs (below) |
 | `nextcloud.settings` | `auto` (sync by itself) and `intervalSecs` |
 | `nextcloud.cancel`, `nextcloud.result` | stop / read the running or last job |
 
@@ -92,9 +94,47 @@ on the server if it was deleted there), `server` replaces this machine's file an
 (or restores it here). A side that no longer has the file cannot be kept. Keeping *both* (the other side's
 edit as a named version of the photo) is not built yet.
 
+## Travel packs
+
+For editing away from home without carrying the originals (a Canon 80D raw is 25 MB; a smart preview is a
+fraction of that). A pack is a folder on the server, `/LightCraft/<name>/` (`base` changes the first part):
+
+```text
+manifest.json              what each photo is: path, size, camera data, content hash …
+previews/<xx>/<hash>.lcsp  the smart previews, named by the hash of the original's bytes
+photos/<path>/IMG.xmp      the sidecars, in folders laid out like the originals' folders
+```
+
+**On the computer that has the originals** select the photos and use *Publish selected photos* in the dialog
+(`nextcloud.pack.publish {name}`; `ids` or `all` instead of the selection). The folder the photos share
+(or `root`) becomes a folder pair with `photos/`. Photos that have no smart preview yet get one first, in the
+background; the command says so (`needsSmartPreviews`) and sends nothing, so press it again when they are done.
+Publishing writes the sidecars of the pack's photos next to the originals, as *Write Changes into XMP* would.
+
+**On the laptop** *Look for packs*, then *Open* (`nextcloud.pack.open {name}`). The previews and sidecars are
+fetched, and every photo of the pack is added to the library as a record whose original is not there (like a
+photo on an unplugged drive; the library shows it as missing) and which is edited from its smart preview.
+`local` says where the pack lives on the laptop (`Travel Packs/<name>` in the library by default). A photo
+the library already has, by path or by content, is not added twice.
+
+From then on the PC's photo folder and the laptop's `photos/` folder are two ends of an ordinary folder pair
+on the server's `photos/`: with *Sync by itself* on (or with *Sync now*) an edit made on the laptop arrives as
+a sidecar on the PC, where *Synchronize Folder* applies it as for any sidecar, and the other way round.
+Conflicts are decided as always. Nothing bounces back: opening a pack does not rewrite the sidecars it just
+fetched.
+
+Everything read from a pack is untrusted: a manifest entry that is invalid (a path leaving the pack, an
+absurd size, a duplicate) is skipped and counted (`skippedEntries`), a manifest from a newer format version is
+refused, and sizes and counts are capped. The manifest is uploaded last, so a pack that is listed is complete
+as far as its previews go; a second publish sends only the previews that are not on the server yet.
+
+Limits: previews are sent one after the other; a photo outside the pack's folder is skipped (and listed);
+*Remove* on a missing original in the library is not what you want for pack photos; the web build has no packs.
+
 ## What is saved, and where
 
 - `prefs.json` of the library: server name, address and user name, and the folder pairs. **No password.**
+- `Nextcloud/pack-<name>.json` in the library folder: which previews of a pack were already sent.
 - `Nextcloud/<pair id>.json` in the library folder: the record of the last transfer of each file and the
   versions of the server's folders. It is read back as untrusted input; a damaged record is kept as
   `.corrupt-<time>` and the pair starts afresh (every file that differs is then a conflict, never an
@@ -127,5 +167,5 @@ no conflict, failure or reported deletion.
 ## Not yet
 
 Remembering the password in the macOS Keychain and the Linux secret service (the Windows store is done),
-keeping both sides of a conflict, translations of the dialog beyond German, and the travel pack (smart previews
-and a manifest, to edit without the originals).
+keeping both sides of a conflict, translations of the dialog beyond German, downloading whole folders of
+originals, and exporting finished photos to the Nextcloud.

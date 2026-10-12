@@ -247,5 +247,10 @@
   "{n} photos opened for editing; each is stacked with its original": "{n} Fotos zur Bearbeitung geöffnet; jedes ist mit seinem Original gestapelt",
   "Signed in as {user}.": "Angemeldet als {user}.",
   "Sent {sent}, received {got}.": "{sent} gesendet, {got} empfangen.",
-  "{n} photos updated from what arrived.": "{n} Fotos mit dem Empfangenen aktualisiert."
+  "{n} photos updated from what arrived.": "{n} Fotos mit dem Empfangenen aktualisiert.",
+  "Published {photos} photos, {sent} previews sent.": "{photos} Fotos veröffentlicht, {sent} Vorschauen gesendet.",
+  "{n} previews could not be sent.": "{n} Vorschauen konnten nicht gesendet werden.",
+  "Opened {photos} photos, {added} of them new here.": "{photos} Fotos geöffnet, davon {added} neu hier.",
+  "{n} previews could not be fetched.": "{n} Vorschauen konnten nicht geladen werden.",
+  "Making smart previews first ({n}). Press Publish again when they are done.": "Zuerst werden Smart Previews erstellt ({n}). Drücke danach erneut auf Veröffentlichen."
 }

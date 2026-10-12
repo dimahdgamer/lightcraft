@@ -247,5 +247,10 @@
   "{n} photos opened for editing; each is stacked with its original": "已打开 {n} 张照片进行编辑；每张都与其原片堆叠在一起",
   "Signed in as {user}.": "Signed in as {user}.",
   "Sent {sent}, received {got}.": "Sent {sent}, received {got}.",
-  "{n} photos updated from what arrived.": "{n} photos updated from what arrived."
+  "{n} photos updated from what arrived.": "{n} photos updated from what arrived.",
+  "Published {photos} photos, {sent} previews sent.": "Published {photos} photos, {sent} previews sent.",
+  "{n} previews could not be sent.": "{n} previews could not be sent.",
+  "Opened {photos} photos, {added} of them new here.": "Opened {photos} photos, {added} of them new here.",
+  "{n} previews could not be fetched.": "{n} previews could not be fetched.",
+  "Making smart previews first ({n}). Press Publish again when they are done.": "Making smart previews first ({n}). Press Publish again when they are done."
 }

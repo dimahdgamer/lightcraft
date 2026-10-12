@@ -12,6 +12,7 @@
 //! (see `lightcraft_nextcloud::plan`).
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 /// The environment variable that supplies the app password when none is stored (scripts, CI).
 pub const ENV_PASSWORD: &str = "LIGHTCRAFT_NEXTCLOUD_PASSWORD";
@@ -182,6 +183,14 @@ pub(crate) mod native {
         outcome: Option<Result<Value, String>>,
         /// Local sidecars this job downloaded and the catalog has not read yet.
         downloaded: Vec<PathBuf>,
+        /// What the catalog must do once the job is done (it is changed on the session's thread only).
+        pending: Vec<Pending>,
+    }
+
+    /// A change to the catalog that follows a job.
+    pub enum Pending {
+        /// Make offline records of a travel pack's photos.
+        PackPhotos { manifest: crate::travel::Manifest, photos_root: PathBuf },
     }
 
     struct Job {
@@ -214,6 +223,11 @@ pub(crate) mod native {
         /// Sidecars that arrived from the server, to be read into the catalog once the job is done.
         pub fn add_downloaded(&self, paths: impl IntoIterator<Item = PathBuf>) {
             lock(&self.shared).downloaded.extend(paths);
+        }
+
+        /// A change to make to the catalog once the job is done.
+        pub fn add_pending(&self, p: Pending) {
+            lock(&self.shared).pending.push(p);
         }
     }
 
@@ -401,14 +415,15 @@ pub(crate) mod native {
             lock(&job.shared).outcome.clone().unwrap_or_else(|| Err("the Nextcloud job ended without a result".into()))
         }
 
-        /// The sidecars the finished job downloaded, once (empty while it runs or when applied).
-        pub fn take_downloaded(&mut self) -> Vec<PathBuf> {
+        /// What the finished job leaves for the catalog, once: the changes to make and the sidecars it
+        /// downloaded (both empty while it runs or when already taken).
+        pub fn take_finished(&mut self) -> (Vec<Pending>, Vec<PathBuf>) {
             match &self.job {
                 Some(j) => {
                     let mut s = lock(&j.shared);
-                    if s.running { Vec::new() } else { std::mem::take(&mut s.downloaded) }
+                    if s.running { (Vec::new(), Vec::new()) } else { (std::mem::take(&mut s.pending), std::mem::take(&mut s.downloaded)) }
                 }
-                None => Vec::new(),
+                None => (Vec::new(), Vec::new()),
             }
         }
 
@@ -480,6 +495,195 @@ pub(crate) mod native {
             }
             Err(e) => json!({"sidecars": downloaded.len(), "photos": ids.len(), "read": 0, "error": e.to_string()}),
         }
+    }
+
+    /// A problem that ends a whole job rather than one file of it.
+    fn fatal(e: &lightcraft_nextcloud::ClientError) -> bool {
+        use lightcraft_nextcloud::ClientError as E;
+        matches!(e, E::Cancelled | E::BadCredentials | E::Network(_) | E::Redirect(_) | E::NoSpace | E::InsecureServer(_) | E::BadServer(_))
+    }
+
+    /// The previews of a pack already on the server, kept so a second publish sends only what is new.
+    fn load_sent(path: &Path) -> std::collections::HashSet<String> {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok())
+            .map(|v| v.into_iter().collect())
+            .unwrap_or_default()
+    }
+
+    fn save_sent(path: &Path, sent: &std::collections::HashSet<String>) {
+        let mut names: Vec<&String> = sent.iter().collect();
+        names.sort();
+        if let Ok(text) = serde_json::to_string(&names) {
+            let _ = safe_file::write_atomic(path, text.as_bytes());
+        }
+    }
+
+    /// Publishing a travel pack, ready to run on a worker thread.
+    pub struct PublishJob {
+        pub client: Client,
+        pub name: String,
+        /// `<base>/<name>` on the server.
+        pub pack: RemotePath,
+        pub manifest: String,
+        pub photos: usize,
+        /// Each smart preview to send: the file here and its place in the pack (`<xx>/<name>`).
+        pub previews: Vec<(PathBuf, String)>,
+        /// Where the previews already sent are noted.
+        pub record: PathBuf,
+        /// The sidecars: `photos/` of the pack and the photo folder.
+        pub pair: PairJob,
+        /// What the command found out (photos left out, sidecars that could not be written), for the reply.
+        pub extra: Value,
+    }
+
+    /// Send the previews that are not there yet, then the manifest (last, so a reader never sees a
+    /// manifest whose previews are missing), then the sidecars.
+    pub fn run_publish(job: PublishJob, cancel: &AtomicBool, progress: &Progress) -> Result<Value, String> {
+        let PublishJob { client, name, pack, manifest, photos, previews, record, pair, extra } = job;
+        let err = |e: lightcraft_nextcloud::ClientError| e.to_string();
+        progress.detail(&name);
+        client.mkcol_all(&pack, cancel).map_err(err)?;
+        let mut sent = load_sent(&record);
+        let total = previews.len() as u64;
+        let (mut uploaded, mut failed) = (0usize, 0usize);
+        let mut made: std::collections::HashSet<RemotePath> = std::collections::HashSet::new();
+        for (i, (file, rel)) in previews.iter().enumerate() {
+            progress.set(i as u64, total);
+            if sent.contains(rel) {
+                continue;
+            }
+            let Some((shard, file_name)) = rel.split_once('/') else {
+                failed += 1;
+                continue;
+            };
+            let dir = pack.join("previews").and_then(|d| d.join(shard)).map_err(|e| e.to_string())?;
+            let remote = dir.join(file_name).map_err(|e| e.to_string())?;
+            if !made.contains(&dir) {
+                client.mkcol_all(&dir, cancel).map_err(err)?;
+                made.insert(dir);
+            }
+            match client.upload(&remote, file, &lightcraft_nextcloud::Precondition::Create, None, &mut |_, _| {}, cancel) {
+                Ok(_) => {
+                    uploaded += 1;
+                    sent.insert(rel.clone());
+                }
+                // already there (a publish that was cut short, or another pack with the same photo)
+                Err(lightcraft_nextcloud::ClientError::Changed) => {
+                    sent.insert(rel.clone());
+                }
+                Err(e) if fatal(&e) => {
+                    save_sent(&record, &sent);
+                    return Err(e.to_string());
+                }
+                Err(_) => failed += 1,
+            }
+        }
+        save_sent(&record, &sent);
+        progress.set(total, total);
+        let temp = record.with_extension("manifest.json");
+        std::fs::write(&temp, manifest.as_bytes()).map_err(|e| format!("can't write {}: {e}", temp.display()))?;
+        let manifest_path = pack.join(crate::travel::MANIFEST).map_err(|e| e.to_string())?;
+        let up = client.upload(&manifest_path, &temp, &lightcraft_nextcloud::Precondition::Overwrite, None, &mut |_, _| {}, cancel);
+        let _ = std::fs::remove_file(&temp);
+        up.map_err(err)?;
+        let sync = run_pairs(vec![pair], false, cancel, progress)?;
+        let mut result = json!({"pack": name, "photos": photos, "previewsSent": uploaded, "previewsFailed": failed, "sync": sync});
+        if let (Some(o), Some(x)) = (result.as_object_mut(), extra.as_object()) {
+            o.extend(x.clone());
+        }
+        Ok(result)
+    }
+
+    /// Opening a travel pack, ready to run on a worker thread.
+    pub struct OpenJob {
+        pub client: Client,
+        pub name: String,
+        pub pack: RemotePath,
+        /// Where the pack lives on this machine; its photos' (absent) originals are expected in `photos/`.
+        pub local_root: PathBuf,
+        pub smart_dir: PathBuf,
+        pub pair: PairJob,
+    }
+
+    /// Fetch the manifest and the previews this library lacks, then the sidecars; the offline
+    /// records are made afterwards, on the session's thread ([`Pending::PackPhotos`]).
+    pub fn run_open(job: OpenJob, cancel: &AtomicBool, progress: &Progress) -> Result<Value, String> {
+        use lightcraft_nextcloud::{ClientError, Remote};
+        let OpenJob { client, name, pack, local_root, smart_dir, pair } = job;
+        let err = |e: ClientError| e.to_string();
+        progress.detail(&name);
+        let manifest_path = pack.join(crate::travel::MANIFEST).map_err(|e| e.to_string())?;
+        let entry = client.stat(&manifest_path, cancel).map_err(|e| match e {
+            ClientError::NotFound => format!("{name} is not a travel pack on this server (it has no {})", crate::travel::MANIFEST),
+            other => other.to_string(),
+        })?;
+        if entry.size > crate::travel::MAX_MANIFEST_BYTES as u64 {
+            return Err("the pack's manifest is too large".into());
+        }
+        std::fs::create_dir_all(&local_root).map_err(|e| format!("can't create {}: {e}", local_root.display()))?;
+        let dest = local_root.join(crate::travel::MANIFEST);
+        client.download(&manifest_path, &dest, &Remote::from(&entry), &mut |_, _| {}, cancel).map_err(err)?;
+        let text = std::fs::read_to_string(&dest).map_err(|e| format!("can't read {}: {e}", dest.display()))?;
+        let (manifest, skipped) = crate::travel::Manifest::from_json(&text)?;
+
+        let total = manifest.photos.len() as u64;
+        let (mut got, mut have, mut failed) = (0usize, 0usize, 0usize);
+        for (i, ph) in manifest.photos.iter().enumerate() {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err("cancelled".into());
+            }
+            progress.set(i as u64, total);
+            progress.detail(ph.name());
+            let Some((shard, file)) = crate::travel::preview_file(&ph.content_hash) else {
+                failed += 1;
+                continue;
+            };
+            let local = smart_dir.join(&shard).join(&file);
+            if crate::smart::is_valid(&local) {
+                have += 1;
+                continue;
+            }
+            let remote = pack.join("previews").and_then(|d| d.join(&shard)).and_then(|d| d.join(&file)).map_err(|e| e.to_string())?;
+            let fetched = client.stat(&remote, cancel).and_then(|e| client.download(&remote, &local, &Remote::from(&e), &mut |_, _| {}, cancel));
+            match fetched {
+                Ok(()) => got += 1,
+                Err(e) if fatal(&e) => return Err(e.to_string()),
+                Err(_) => failed += 1,
+            }
+        }
+        progress.set(total, total);
+        let sync = run_pairs(vec![pair], false, cancel, progress)?;
+        let photos = manifest.photos.len();
+        progress.add_pending(Pending::PackPhotos { manifest, photos_root: local_root.join("photos") });
+        Ok(
+            json!({"pack": name, "photos": photos, "skippedEntries": skipped, "previewsFetched": got, "previewsHad": have, "previewsFailed": failed, "sync": sync}),
+        )
+    }
+
+    /// The travel packs under `base`: the folders that hold a manifest.
+    pub fn run_pack_list(client: Client, base: RemotePath, cancel: &AtomicBool, progress: &Progress) -> Result<Value, String> {
+        use lightcraft_nextcloud::ClientError;
+        progress.detail(&base.to_string());
+        let entries = match client.list(&base, cancel) {
+            Ok(l) => l.entries,
+            Err(ClientError::NotFound) => Vec::new(),
+            Err(e) => return Err(e.to_string()),
+        };
+        let mut packs = Vec::new();
+        for e in entries.iter().filter(|e| e.is_dir) {
+            progress.detail(e.path.file_name().unwrap_or(""));
+            let inside = match client.list(&e.path, cancel) {
+                Ok(l) => l.entries,
+                Err(err) if fatal(&err) => return Err(err.to_string()),
+                Err(_) => continue,
+            };
+            if let Some(m) = inside.iter().find(|x| !x.is_dir && x.path.file_name() == Some(crate::travel::MANIFEST)) {
+                packs.push(json!({"name": e.path.file_name().unwrap_or(""), "manifestSize": m.size, "modified": m.modified}));
+            }
+        }
+        Ok(json!({"base": base.to_string(), "packs": packs}))
     }
 
     /// The paths of a list for a reply: the first `LIMIT`, and how many there were.
@@ -589,11 +793,26 @@ impl crate::Session {
     /// The Nextcloud commands that report on a job call this, so a frontend that polls
     /// `nextcloud.status` gets the downloads applied when the job is done. `None`: nothing to apply.
     pub fn nextcloud_apply_pending(&mut self) -> Option<serde_json::Value> {
-        let paths = self.nextcloud.rt.take_downloaded();
-        if paths.is_empty() {
+        let (pending, paths) = self.nextcloud.rt.take_finished();
+        if pending.is_empty() && paths.is_empty() {
             return None;
         }
-        let result = native::apply_sidecars(self, &paths);
+        // records first, so the sidecars that came with them find their photos
+        let mut pack = None;
+        for p in pending {
+            match p {
+                native::Pending::PackPhotos { manifest, photos_root } => {
+                    pack = Some(match crate::travel::add_records(self, &manifest, &photos_root) {
+                        Ok(added) => crate::travel::added_json(&added),
+                        Err(e) => json!({"error": e}),
+                    });
+                }
+            }
+        }
+        let mut result = if paths.is_empty() { json!({"sidecars": 0, "photos": 0, "read": 0}) } else { native::apply_sidecars(self, &paths) };
+        if let Some(p) = pack {
+            result["pack"] = p;
+        }
         self.nextcloud.rt.record_apply(result.clone());
         Some(result)
     }

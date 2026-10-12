@@ -3254,6 +3254,7 @@ dependencies = [
  "lightcraft-tiff",
  "log",
  "miniz_oxide 0.8.9",
+ "proptest",
  "rayon",
  "serde",
  "serde_json",

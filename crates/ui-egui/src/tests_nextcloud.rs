@@ -294,3 +294,88 @@ fn the_menu_has_the_entry() {
     let file = &tree.iter().find(|(t, _)| t == "File").expect("File menu").1;
     assert!(format!("{file:?}").contains("app.nextcloud"), "{file:?}");
 }
+
+fn write_png(path: &std::path::Path, seed: u8) {
+    let (w, h) = (48usize, 32usize);
+    let data: Vec<[u8; 4]> = (0..w * h).map(|i| [(i % w * 5) as u8, (i / w * 7) as u8, seed, 255]).collect();
+    let img = lightcraft_raster::Rgba8 { width: w, height: h, data };
+    let bytes = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&img), &lightcraft_codecs::EncodeMeta::default()).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// An app with a library on disk at `lib`.
+fn app_with_library(lib: &std::path::Path) -> Headless {
+    let mut session = lightcraft_engine::Session::new().with_fs();
+    session.open_library(lib, false).unwrap();
+    let app = LightcraftApp::new(session, Services { png: None, ..Default::default() });
+    let mut h = Headless::new(app, [1400.0, 900.0], 1.0);
+    h.settle(SETTLE);
+    h
+}
+
+fn set_pack_name(h: &mut Headless, name: &str) {
+    if let Some(Dialog::Nextcloud { pack, .. }) = &mut h.app.ui.dialog {
+        *pack = name.to_string();
+    } else {
+        panic!("the dialog is not open");
+    }
+    h.step();
+}
+
+#[test]
+fn a_travel_pack_is_published_and_opened_from_the_dialog() {
+    let fake = Fake::start();
+    let dir = Scratch::new("pack");
+    let photos = dir.0.join("pc").join("trip");
+    write_png(&photos.join("dune.png"), 1);
+    write_png(&photos.join("Italy").join("sea.png"), 2);
+
+    // ---- the computer with the photos
+    let mut pc = app_with_library(&dir.0.join("pc-lib"));
+    pc.app.session.execute("library.import", &json!({"paths": [photos.to_string_lossy()]})).unwrap();
+    let ids: Vec<u64> = pc.app.session.catalog.photos().map(|p| p.id.0).collect();
+    assert_eq!(ids.len(), 2);
+    pc.app.session.execute("library.smartPreviews", &json!({"ids": ids})).unwrap();
+    pc.app.session.execute("library.selectAll", &json!({})).unwrap();
+    connect(&mut pc, &fake);
+    set_pack_name(&mut pc, "Trip");
+    click(&mut pc, "button:ncPublish");
+    idle(&mut pc);
+    assert!(shows(&pc, "Published 2 photos, 2 previews sent."), "{:?}", pc.painted_text());
+    assert!(fake.file("LightCraft/Trip/manifest.json").is_some());
+
+    // ---- the laptop: no photos, opens the pack from the dialog
+    let mut laptop = app_with_library(&dir.0.join("laptop-lib"));
+    connect(&mut laptop, &fake);
+    click(&mut laptop, "button:ncPackList");
+    idle(&mut laptop);
+    assert!(shows(&laptop, "Trip"), "{:?}", laptop.painted_text());
+    click(&mut laptop, "button:ncPackOpen:0");
+    idle(&mut laptop);
+    // the frame after the job reads in what arrived
+    laptop.step();
+    laptop.step();
+    assert_eq!(laptop.app.session.catalog.len(), 2, "the pack's photos are in the library");
+    assert!(shows(&laptop, "Opened 2 photos, 2 of them new here."), "{:?}", laptop.painted_text());
+    let any = laptop.app.session.catalog.photos().next().unwrap().id;
+    let st = laptop.app.session.execute("photo.smartPreview", &json!({"id": any.0})).unwrap();
+    assert_eq!((st["smartPreview"].as_bool(), st["originalOnline"].as_bool()), (Some(true), Some(false)), "{st}");
+}
+
+#[test]
+fn publishing_without_smart_previews_says_so_and_does_not_send() {
+    let fake = Fake::start();
+    let dir = Scratch::new("nopreview");
+    let photos = dir.0.join("trip");
+    write_png(&photos.join("dune.png"), 1);
+    let mut pc = app_with_library(&dir.0.join("lib"));
+    pc.app.session.execute("library.import", &json!({"paths": [photos.to_string_lossy()]})).unwrap();
+    pc.app.session.execute("library.selectAll", &json!({})).unwrap();
+    connect(&mut pc, &fake);
+    set_pack_name(&mut pc, "Trip");
+    click(&mut pc, "button:ncPublish");
+    // the previews are made in the background; nothing is on the server yet
+    pc.step();
+    assert!(fake.file("LightCraft/Trip/manifest.json").is_none());
+}
